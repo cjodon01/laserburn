@@ -1,0 +1,34 @@
+# LaserBurn - Development Dependencies
+# Includes all production dependencies plus dev tools
+
+-r requirements.txt
+
+# Testing
+pytest>=7.4.0
+pytest-qt>=4.2.0
+pytest-cov>=4.1.0
+
+# Code Quality
+black>=23.0.0
+flake8>=6.1.0
+mypy>=1.5.0
+isort>=5.12.0
+
+# Type Stubs
+types-Pillow>=10.0.0
+PyQt6-stubs>=6.5.0
+
+# Documentation
+mkdocs>=1.5.0
+mkdocs-material>=9.0.0
+mkdocstrings>=0.23.0
+
+# Build and Packaging
+PyInstaller>=6.0.0
+build>=1.0.0
+twine>=4.0.0
+
+# Development Utilities
+ipython>=8.0.0
+watchdog>=3.0.0
+

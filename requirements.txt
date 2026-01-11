@@ -1,0 +1,28 @@
+# LaserBurn - Production Dependencies
+# Python 3.10+ required
+
+# GUI Framework
+PyQt6>=6.5.0
+PyQt6-WebEngine>=6.5.0
+
+# Serial Communication
+pyserial>=3.5
+
+# Image Processing
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Vector Operations (Boolean operations, offsetting)
+pyclipper>=1.3.0
+
+# File Format Support
+ezdxf>=1.0.0
+svgpathtools>=1.6.0
+
+# Math and Science
+scipy>=1.11.0
+
+# Database (included in Python stdlib)
+# sqlite3 - no pip install needed
+

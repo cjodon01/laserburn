@@ -1,0 +1,497 @@
+"""
+G-Code Generator for LaserBurn
+
+Converts vector paths to G-code for GRBL and compatible controllers.
+"""
+
+from typing import List, Optional
+from dataclasses import dataclass
+from enum import Enum
+
+from ..core.shapes import Point, Shape, LaserSettings
+from ..core.document import Document
+from ..core.layer import Layer
+from .path_optimizer import optimize_paths
+
+
+class LaserMode(Enum):
+    """Laser control mode."""
+    CONSTANT = "M3"  # Constant power mode (recommended for consistent power)
+    DYNAMIC = "M4"   # Dynamic power (scales with speed - can cause inconsistent power)
+
+
+@dataclass
+class GCodeSettings:
+    """Settings for G-code generation."""
+    
+    # Units and positioning
+    use_mm: bool = True              # G21 vs G20
+    absolute_coords: bool = True      # G90 vs G91
+    
+    # Laser settings
+    max_power: int = 1000             # Max S value - MUST match GRBL $30 setting (default: 1000)
+    laser_mode: LaserMode = LaserMode.CONSTANT  # Use constant power for consistent results
+    
+    # Speed settings
+    rapid_speed: float = 6000.0      # mm/min for G0 moves
+    default_cut_speed: float = 1000.0  # mm/min for G1 moves
+    
+    # Machine settings
+    origin: str = "bottom-left"      # Origin position
+    home_on_start: bool = False      # Home machine at start
+    return_to_origin: bool = True    # Return to origin at end
+    
+    # Machine work area limits (in mm)
+    # These define the physical limits of the laser bed
+    work_area_x: float = 400.0       # Maximum X travel (mm) - default 400mm
+    work_area_y: float = 400.0       # Maximum Y travel (mm) - default 400mm
+    work_area_z: float = 50.0        # Maximum Z travel (mm)
+    min_x: float = 0.0               # Minimum X (usually 0)
+    min_y: float = 0.0               # Minimum Y (usually 0)
+    min_z: float = 0.0               # Minimum Z (usually 0)
+    
+    # Safety
+    laser_off_delay: float = 0.0     # Delay after M5 (ms)
+    
+    # Optimization
+    optimize_paths: bool = True      # Reorder paths
+    min_power: float = 0.0           # Min power for traversal
+    
+    def validate_coordinate(self, x: float, y: float, z: float = 0.0) -> tuple[bool, str]:
+        """
+        Validate if coordinates are within machine limits.
+        
+        Returns:
+            (is_valid, error_message)
+        """
+        if x < self.min_x or x > self.work_area_x:
+            return False, f"X coordinate {x:.2f}mm is outside work area ({self.min_x:.2f} - {self.work_area_x:.2f}mm)"
+        if y < self.min_y or y > self.work_area_y:
+            return False, f"Y coordinate {y:.2f}mm is outside work area ({self.min_y:.2f} - {self.work_area_y:.2f}mm)"
+        if z < self.min_z or z > self.work_area_z:
+            return False, f"Z coordinate {z:.2f}mm is outside work area ({self.min_z:.2f} - {self.work_area_z:.2f}mm)"
+        return True, ""
+    
+    def get_max_coordinates(self) -> tuple[float, float, float]:
+        """Get maximum valid coordinates."""
+        return (self.work_area_x, self.work_area_y, self.work_area_z)
+
+
+class GCodeGenerator:
+    """Generate G-code from LaserBurn documents."""
+    
+    def __init__(self, settings: GCodeSettings = None):
+        self.settings = settings or GCodeSettings()
+        self._gcode_lines: List[str] = []
+        self._current_x: float = 0.0
+        self._current_y: float = 0.0
+        self._laser_on: bool = False
+        self._current_power: int = 0
+        self._current_speed: float = 0.0
+    
+    def generate(self, document: Document) -> tuple[str, list[str]]:
+        """
+        Generate G-code for an entire document.
+        
+        Returns:
+            (gcode_string, warnings_list)
+        """
+        self._reset_state()
+        self._gcode_lines = []
+        warnings = []
+        
+        # Check document dimensions against machine limits
+        if document.width > self.settings.work_area_x:
+            warnings.append(f"Document width ({document.width:.2f}mm) exceeds machine X limit ({self.settings.work_area_x:.2f}mm)")
+        if document.height > self.settings.work_area_y:
+            warnings.append(f"Document height ({document.height:.2f}mm) exceeds machine Y limit ({self.settings.work_area_y:.2f}mm)")
+        
+        # Check all shapes' bounding boxes
+        for layer in document.layers:
+            if not layer.visible:
+                continue
+            for shape in layer.shapes:
+                if not shape.visible:
+                    continue
+                bbox = shape.get_bounding_box()
+                if bbox.max_x > self.settings.work_area_x:
+                    warnings.append(f"Shape '{shape.name}' extends beyond X limit (max: {bbox.max_x:.2f}mm, limit: {self.settings.work_area_x:.2f}mm)")
+                if bbox.max_y > self.settings.work_area_y:
+                    warnings.append(f"Shape '{shape.name}' extends beyond Y limit (max: {bbox.max_y:.2f}mm, limit: {self.settings.work_area_y:.2f}mm)")
+        
+        # Header
+        self._add_header(document)
+        
+        # Process layers in cut order
+        sorted_layers = sorted(document.layers, key=lambda l: l.cut_order)
+        
+        for layer in sorted_layers:
+            if not layer.visible:
+                continue
+            
+            self._process_layer(layer)
+        
+        # Footer
+        self._add_footer()
+        
+        return '\n'.join(self._gcode_lines), warnings
+    
+    def _reset_state(self):
+        """Reset generator state."""
+        self._current_x = 0.0
+        self._current_y = 0.0
+        self._laser_on = False
+        self._current_power = 0
+        self._current_speed = 0.0
+    
+    def _add_header(self, document: Document):
+        """Add G-code header/preamble."""
+        self._emit("; LaserBurn G-Code Output")
+        self._emit(f"; Document: {document.name}")
+        self._emit(f"; Size: {document.width}mm x {document.height}mm")
+        self._emit("")
+        
+        # Units
+        if self.settings.use_mm:
+            self._emit("G21 ; Set units to mm")
+        else:
+            self._emit("G20 ; Set units to inches")
+        
+        # Positioning mode
+        if self.settings.absolute_coords:
+            self._emit("G90 ; Absolute positioning")
+        else:
+            self._emit("G91 ; Relative positioning")
+        
+        # Home if requested
+        if self.settings.home_on_start:
+            self._emit("$H ; Home machine")
+        
+        # Laser off to start
+        self._emit("M5 ; Laser off")
+        self._emit(f"G0 F{self.settings.rapid_speed} ; Set rapid speed")
+        self._emit("")
+    
+    def _add_footer(self):
+        """Add G-code footer/cleanup."""
+        self._emit("")
+        self._emit("; End of job")
+        self._laser_off()
+        
+        if self.settings.return_to_origin:
+            self._emit("G0 X0 Y0 ; Return to origin")
+        
+        self._emit("M5 ; Ensure laser off")
+        self._emit("M2 ; End program")
+    
+    def _process_layer(self, layer: Layer):
+        """Process all shapes in a layer."""
+        self._emit(f"; Layer: {layer.name}")
+        
+        # Collect all paths from layer
+        all_paths = []
+        path_settings = []
+        
+        for shape in layer.shapes:
+            if not shape.visible:
+                continue
+            
+            try:
+                paths = shape.get_paths()
+                # Filter out empty paths
+                valid_paths = [p for p in paths if p and len(p) > 0]
+                
+                if not valid_paths:
+                    # Text shapes might return empty paths if text is empty or font issue
+                    # Skip silently or log a warning
+                    continue
+                
+                for path in valid_paths:
+                    all_paths.append(path)
+                    # Use layer settings if enabled, else shape settings
+                    if layer.use_layer_settings:
+                        path_settings.append(layer.laser_settings)
+                    else:
+                        path_settings.append(shape.laser_settings)
+            except Exception as e:
+                # Log error but continue processing other shapes
+                print(f"Error processing shape {shape.name if hasattr(shape, 'name') else 'unknown'}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Optimize path order if enabled
+        if self.settings.optimize_paths and all_paths:
+            start = Point(self._current_x, self._current_y)
+            all_paths = optimize_paths(all_paths, start)
+        
+        # Cut each path
+        for i, path in enumerate(all_paths):
+            settings = path_settings[min(i, len(path_settings)-1)]
+            self._cut_path(path, settings)
+        
+        self._emit("")
+    
+    def _canvas_to_laser(self, canvas_point: Point, document_height: float, document_width: float) -> Point:
+        """
+        Transform canvas coordinates to laser coordinates.
+        
+        Rotates 90° counter-clockwise:
+        - Canvas X (right) → Laser Y (forward)
+        - Canvas Y (down) → Laser X (with proper mapping)
+        
+        Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
+        Canvas bottom-right (width, height) → Laser top-left (0, width)
+        """
+        # Rotate 90° CCW: (x, y) → (-y, x) in standard math
+        # But we need to adjust for coordinate systems:
+        # Canvas: origin at top-left, Y increases down, X increases right
+        # Laser: origin at bottom-left, Y increases up, X increases right
+        # 
+        # For 90° CCW rotation mapping canvas to laser:
+        # Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
+        # Canvas bottom-right (width, height) → Laser top-left (0, width)
+        # Canvas top-left (0, 0) → Laser bottom-right (height, 0)
+        # Canvas top-right (width, 0) → Laser top-right (height, width)
+        # Rotate 90° CCW and fix bottom-left → bottom-left mapping
+        # Canvas bottom-left (0, height) should → Laser bottom-left (0, 0)
+        # Currently mapping to bottom-right, so we need to flip Y axis
+        # Canvas coordinate system: X increases right, Y increases down, origin top-left
+        # Laser coordinate system: X increases right, Y increases up, origin bottom-left
+        # 
+        # For 90° CCW rotation: (x, y) → (-y, x) then adjust for coordinate systems
+        # Canvas (0, height) → Laser (0, 0) means:
+        # - laser_x = 0 when canvas_y = height → laser_x = height - canvas_y ✓
+        # - laser_y = 0 when canvas_x = 0 → laser_y = canvas_x ✓
+        # But user says it's going to bottom-right, so maybe Y needs to be flipped?
+        # Try: laser_y = width - canvas_x to flip Y axis
+        # Transform canvas to laser coordinates
+        # Origin (0,0) is correct, but X and Y axes are swapped
+        # Canvas X (right) should map to Laser X (right)
+        # Canvas Y (down) should map to Laser Y (forward/up, with offset)
+        #
+        # Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
+        # Canvas bottom-right (width, height) → Laser bottom-right (width, 0)
+        # Canvas top-left (0, 0) → Laser top-left (0, height)
+        # Canvas top-right (width, 0) → Laser top-right (width, height)
+        #
+        # So we just need to flip the Y axis, not rotate:
+        laser_x = canvas_point.x  # Canvas X (right) → Laser X (right)
+        laser_y = document_height - canvas_point.y  # Canvas Y (down) → Laser Y (up, flipped)
+        return Point(laser_x, laser_y)
+    
+    def _cut_path(self, path: List[Point], settings: LaserSettings):
+        """Generate G-code for a single path."""
+        if not path or len(path) < 2:
+            return
+        
+        # Calculate power value - use rounding for better accuracy
+        power_percent = max(0.0, min(100.0, settings.power))  # Clamp to 0-100
+        power = int(round((power_percent / 100.0) * self.settings.max_power))
+        power = max(0, min(self.settings.max_power, power))  # Clamp to valid range
+        speed = settings.speed * 60  # Convert mm/s to mm/min
+        
+        # Transform canvas coordinates to laser coordinates
+        document_height = getattr(self, '_current_document_height', 400.0)  # Default fallback
+        document_width = getattr(self, '_current_document_width', 400.0)  # Default fallback
+        
+        # Move to start point (laser off)
+        start = path[0]
+        laser_start = self._canvas_to_laser(start, document_height, document_width)
+        if laser_start.x != self._current_x or laser_start.y != self._current_y:
+            self._rapid_move(laser_start.x, laser_start.y)
+        
+        # Turn on laser and cut
+        self._laser_on_with_power(power)
+        self._set_speed(speed)
+        
+        # Cut along path (transform coordinates)
+        for point in path[1:]:
+            laser_point = self._canvas_to_laser(point, document_height, document_width)
+            self._linear_move(laser_point.x, laser_point.y)
+        
+        # Multiple passes
+        if settings.passes > 1:
+            for pass_num in range(1, settings.passes):
+                self._emit(f"; Pass {pass_num + 1}")
+                # Reverse direction for alternating passes
+                for point in reversed(path[:-1]):
+                    laser_point = self._canvas_to_laser(point, document_height, document_width)
+                    self._linear_move(laser_point.x, laser_point.y)
+                for point in path[1:]:
+                    laser_point = self._canvas_to_laser(point, document_height, document_width)
+                    self._linear_move(laser_point.x, laser_point.y)
+        
+        # Laser off after path
+        self._laser_off()
+    
+    def _emit(self, line: str):
+        """Add a line to the output."""
+        self._gcode_lines.append(line)
+    
+    def _rapid_move(self, x: float, y: float):
+        """Generate rapid move (G0)."""
+        if x == self._current_x and y == self._current_y:
+            return
+        
+        # Validate coordinates against machine limits
+        is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
+        if not is_valid:
+            self._emit(f"; WARNING: {error_msg}")
+            self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
+            return
+        
+        cmd = "G0"
+        if x != self._current_x:
+            cmd += f" X{x:.3f}"
+        if y != self._current_y:
+            cmd += f" Y{y:.3f}"
+        
+        self._emit(cmd)
+        self._current_x = x
+        self._current_y = y
+    
+    def _linear_move(self, x: float, y: float):
+        """Generate linear move (G1)."""
+        if x == self._current_x and y == self._current_y:
+            return
+        
+        # Validate coordinates against machine limits
+        is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
+        if not is_valid:
+            self._emit(f"; WARNING: {error_msg}")
+            self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
+            return
+        
+        cmd = "G1"
+        if x != self._current_x:
+            cmd += f" X{x:.3f}"
+        if y != self._current_y:
+            cmd += f" Y{y:.3f}"
+        
+        # Include S value in G1 commands to ensure power is maintained
+        # This is especially important for M4 (dynamic) mode, but doesn't hurt for M3
+        if self._laser_on and self._current_power > 0:
+            cmd += f" S{self._current_power}"
+        
+        self._emit(cmd)
+        self._current_x = x
+        self._current_y = y
+    
+    def _laser_on_with_power(self, power: int):
+        """Turn laser on with specified power."""
+        mode = self.settings.laser_mode.value
+        if not self._laser_on or power != self._current_power:
+            self._emit(f"{mode} S{power}")
+            self._laser_on = True
+            self._current_power = power
+    
+    def _laser_off(self):
+        """Turn laser off."""
+        if self._laser_on:
+            self._emit("M5")
+            self._laser_on = False
+            self._current_power = 0
+    
+    def _set_speed(self, speed: float):
+        """Set feed rate."""
+        if speed != self._current_speed:
+            self._emit(f"G1 F{speed:.0f}")
+            self._current_speed = speed
+    
+    def generate_frame(self, document: Document) -> tuple[str, list[str]]:
+        """
+        Generate G-code to frame (outline) the design without enabling laser.
+        
+        This traces only the outer perimeter (bounding box) of all visible shapes
+        using G0 rapid moves only. No laser commands (M3/M4/M5) are included.
+        
+        Returns:
+            (gcode_string, warnings_list)
+        """
+        self._reset_state()
+        self._gcode_lines = []
+        warnings = []
+        
+        # Store document dimensions for coordinate transformation
+        self._current_document_height = document.height
+        self._current_document_width = document.width
+        
+        # Calculate the bounding box of all visible shapes (in canvas coordinates)
+        design_bounds = document.get_design_bounds()
+        
+        if not design_bounds:
+            warnings.append("No visible shapes found to frame")
+            return '\n'.join(self._gcode_lines), warnings
+        
+        # Transform bounding box corners to laser coordinates
+        bottom_left_canvas = Point(design_bounds.min_x, design_bounds.max_y)  # Canvas bottom-left
+        bottom_right_canvas = Point(design_bounds.max_x, design_bounds.max_y)  # Canvas bottom-right
+        top_left_canvas = Point(design_bounds.min_x, design_bounds.min_y)  # Canvas top-left
+        top_right_canvas = Point(design_bounds.max_x, design_bounds.min_y)  # Canvas top-right
+        
+        bottom_left_laser = self._canvas_to_laser(bottom_left_canvas, document.height, document.width)
+        bottom_right_laser = self._canvas_to_laser(bottom_right_canvas, document.height, document.width)
+        top_left_laser = self._canvas_to_laser(top_left_canvas, document.height, document.width)
+        top_right_laser = self._canvas_to_laser(top_right_canvas, document.height, document.width)
+        
+        # Check design bounds against machine limits (using laser coordinates)
+        laser_width = max(bottom_right_laser.x - bottom_left_laser.x, top_right_laser.x - top_left_laser.x)
+        laser_height = max(top_left_laser.y - bottom_left_laser.y, top_right_laser.y - bottom_right_laser.y)
+        if laser_width > self.settings.work_area_x:
+            warnings.append(f"Design width ({laser_width:.2f}mm) exceeds machine X limit ({self.settings.work_area_x:.2f}mm)")
+        if laser_height > self.settings.work_area_y:
+            warnings.append(f"Design height ({laser_height:.2f}mm) exceeds machine Y limit ({self.settings.work_area_y:.2f}mm)")
+        
+        # Header (no laser commands)
+        self._emit("; LaserBurn Frame G-Code")
+        self._emit(f"; Document: {document.name}")
+        self._emit(f"; Design bounds (laser coords): {laser_width:.2f}mm x {laser_height:.2f}mm")
+        self._emit(f"; Position: X{bottom_left_laser.x:.2f} Y{bottom_left_laser.y:.2f}")
+        self._emit("; Frame mode - laser will NOT be enabled")
+        self._emit("")
+        
+        # Units
+        if self.settings.use_mm:
+            self._emit("G21 ; Set units to mm")
+        else:
+            self._emit("G20 ; Set units to inches")
+        
+        # Positioning mode
+        if self.settings.absolute_coords:
+            self._emit("G90 ; Absolute positioning")
+        else:
+            self._emit("G91 ; Relative positioning")
+        
+        # Set rapid speed
+        self._emit(f"G0 F{self.settings.rapid_speed} ; Set rapid speed")
+        self._emit("")
+        
+        # Frame the bounding box rectangle (4 corners in laser coordinates)
+        # Start at bottom-left (in laser coords)
+        self._rapid_move(bottom_left_laser.x, bottom_left_laser.y)
+        # Move to bottom-right
+        self._rapid_move(bottom_right_laser.x, bottom_right_laser.y)
+        # Move to top-right
+        self._rapid_move(top_right_laser.x, top_right_laser.y)
+        # Move to top-left
+        self._rapid_move(top_left_laser.x, top_left_laser.y)
+        # Close the rectangle by returning to start
+        self._rapid_move(bottom_left_laser.x, bottom_left_laser.y)
+        
+        # Return to origin if requested
+        if self.settings.return_to_origin:
+            self._emit("")
+            self._emit("; Return to origin")
+            self._rapid_move(0, 0)
+        
+        self._emit("")
+        self._emit("; End of frame")
+        
+        return '\n'.join(self._gcode_lines), warnings
+    
+    def save_to_file(self, gcode: str, filepath: str):
+        """Save G-code to a file."""
+        with open(filepath, 'w') as f:
+            f.write(gcode)
+

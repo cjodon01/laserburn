@@ -260,26 +260,73 @@ class LaserCanvas(QGraphicsView):
         try:
             from ..graphics.text_item import EditableTextItem
             from ..core.shapes import Text as TextShape
+            from ..graphics.items import SelectionHandleItem
             
-            # Clear existing items (except temp item and EditableTextItems)
+            # Build a map of all shapes currently in the document
+            doc_shape_ids = set()
+            for layer in self.document.layers:
+                for shape in layer.shapes:
+                    doc_shape_ids.add(shape.id)
+            
+            # Track existing items by shape ID
+            existing_items = {}  # shape.id -> item
             items_to_remove = []
-            text_items_to_keep = {}  # Map shape ID to item
             
             for item in self.scene.items():
                 if item == self._temp_item:
+                    # Keep temp item if it's a text item being edited (hasn't created shape yet)
+                    if isinstance(item, EditableTextItem):
+                        # Check if it has a shape - if not, it's still being created
+                        shape = item._text_shape or item.data(0)
+                        if shape and hasattr(shape, 'id') and shape.id in doc_shape_ids:
+                            existing_items[shape.id] = item
                     continue
-                # Keep EditableTextItems - we'll update them instead of removing
+                # Skip selection handles
+                if isinstance(item, SelectionHandleItem):
+                    continue
+                
+                # Get shape from item
+                shape = None
                 if isinstance(item, EditableTextItem):
+                    shape = item._text_shape or item.data(0)
+                    # If item is being dragged, don't remove it even if shape is missing temporarily
+                    if not shape and hasattr(item, '_is_dragging') and item._is_dragging:
+                        continue
+                elif isinstance(item, ShapeGraphicsItem):
+                    shape = item.shape_ref
+                else:
                     shape = item.data(0)
-                    if shape and hasattr(shape, 'id'):
-                        text_items_to_keep[shape.id] = item
-                    continue
-                items_to_remove.append(item)
+                
+                if shape and hasattr(shape, 'id'):
+                    if shape.id in doc_shape_ids:
+                        # Shape is still in document - keep item
+                        # IMPORTANT: Only one item per shape ID
+                        if shape.id not in existing_items:
+                            existing_items[shape.id] = item
+                        else:
+                            # Duplicate item found - remove this one (keep the first one)
+                            items_to_remove.append(item)
+                    else:
+                        # Shape no longer in document - remove item
+                        items_to_remove.append(item)
+                elif isinstance(item, EditableTextItem):
+                    # Text item without shape - might be temp item being created
+                    # Keep it if it's being edited or dragged
+                    if item.is_editing:
+                        continue
+                    if hasattr(item, '_is_dragging') and item._is_dragging:
+                        continue
+                    # Otherwise remove it
+                    items_to_remove.append(item)
+                else:
+                    # Non-text item without shape reference - remove
+                    items_to_remove.append(item)
             
+            # Remove orphaned items
             for item in items_to_remove:
                 self.scene.removeItem(item)
             
-            # Add shapes from all layers
+            # Add/update shapes from all layers
             for layer in self.document.layers:
                 if not layer.visible:
                     continue
@@ -294,30 +341,65 @@ class LaserCanvas(QGraphicsView):
                             continue
                         
                         try:
+                            # Check if we already have an item for this shape
+                            if shape.id in existing_items:
+                                # Update existing item if needed
+                                item = existing_items[shape.id]
+                                if isinstance(item, EditableTextItem):
+                                    # Don't update if user is editing
+                                    if item.is_editing:
+                                        continue
+                                    # Don't update if item is being dragged
+                                    if hasattr(item, '_is_dragging') and item._is_dragging:
+                                        continue
+                                    # Don't update position if item was just moved (position might be different)
+                                    # Only update if the shape position is significantly different
+                                    shape_pos = QPointF(shape.position.x, shape.position.y)
+                                    item_pos = item.pos()
+                                    if abs(shape_pos.x() - item_pos.x()) > 0.1 or abs(shape_pos.y() - item_pos.y()) > 0.1:
+                                        # Position differs - don't update (user might be dragging)
+                                        continue
+                                    # Safe to update
+                                    item.set_text_shape(shape)
+                                # For other items, path updates are handled by ShapeGraphicsItem
+                                continue
+                            
                             # Handle Text shapes specially - use EditableTextItem
                             if isinstance(shape, TextShape):
-                                # Check if we already have an item for this shape
-                                if shape.id in text_items_to_keep:
-                                    # Update existing item
-                                    item = text_items_to_keep[shape.id]
-                                    item.set_text_shape(shape)
-                                else:
-                                    # Create new EditableTextItem
-                                    item = EditableTextItem(
-                                        text=shape.text,
-                                        position=QPointF(shape.position.x, shape.position.y),
-                                        font_family=shape.font_family,
-                                        font_size=shape.font_size,
-                                        bold=shape.bold,
-                                        italic=shape.italic
-                                    )
-                                    item.set_text_shape(shape)
-                                    # Connect signals for editing
-                                    item.editing_finished.connect(self._on_text_editing_finished)
-                                    item.editing_cancelled.connect(self._on_text_editing_cancelled)
-                                    item.setData(0, shape)  # Store shape reference
-                                    item.setData(1, layer)  # Store layer reference
-                                    self.scene.addItem(item)
+                                # Check if we already have an item for this shape (double-check)
+                                # This prevents duplicates if existing_items wasn't properly populated
+                                existing_item = None
+                                for scene_item in self.scene.items():
+                                    if isinstance(scene_item, EditableTextItem):
+                                        scene_shape = scene_item._text_shape or scene_item.data(0)
+                                        if scene_shape and hasattr(scene_shape, 'id') and scene_shape.id == shape.id:
+                                            existing_item = scene_item
+                                            break
+                                
+                                if existing_item:
+                                    # Item already exists - don't create duplicate
+                                    # Update it if not being edited or dragged
+                                    if not existing_item.is_editing:
+                                        if not (hasattr(existing_item, '_is_dragging') and existing_item._is_dragging):
+                                            existing_item.set_text_shape(shape)
+                                    continue
+                                
+                                # Create new EditableTextItem only if one doesn't exist
+                                item = EditableTextItem(
+                                    text=shape.text,
+                                    position=QPointF(shape.position.x, shape.position.y),
+                                    font_family=shape.font_family,
+                                    font_size=shape.font_size,
+                                    bold=shape.bold,
+                                    italic=shape.italic
+                                )
+                                item.set_text_shape(shape)
+                                # Connect signals for editing
+                                item.editing_finished.connect(self._on_text_editing_finished)
+                                item.editing_cancelled.connect(self._on_text_editing_cancelled)
+                                item.setData(0, shape)  # Store shape reference
+                                item.setData(1, layer)  # Store layer reference
+                                self.scene.addItem(item)
                             else:
                                 # Use regular graphics item for other shapes
                                 item = self._create_graphics_item(shape, pen)
@@ -399,12 +481,9 @@ class LaserCanvas(QGraphicsView):
                 
                 # Check if clicking on a text item
                 if item and isinstance(item, EditableTextItem):
-                    # Select the text item (it's already selectable)
+                    # Use SelectionManager to handle text item selection too
                     add_to_selection = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) != 0
-                    if not add_to_selection:
-                        self.scene.clearSelection()
-                    item.setSelected(True)
-                    self._update_selection()
+                    self._selection_manager.select_item(item, add_to_selection=add_to_selection)
                     super().mousePressEvent(event)
                     return
                 
@@ -458,14 +537,23 @@ class LaserCanvas(QGraphicsView):
                             italic=getattr(self._current_drawing_tool, '_italic', False)
                         )
                         
+                        # Store layer reference immediately (needed for deletion)
+                        text_item.setData(1, self._active_layer)
+                        
                         # Connect signals
                         text_item.editing_finished.connect(self._on_text_editing_finished)
                         text_item.editing_cancelled.connect(self._on_text_editing_cancelled)
                         
                         self.scene.addItem(text_item)
                         self._temp_item = text_item
-                        # Start editing immediately
-                        text_item.start_editing()
+                        
+                        # Ensure item gets focus and starts editing immediately
+                        # Use QTimer to ensure focus happens after item is fully added to scene
+                        from PyQt6.QtCore import QTimer
+                        def start_text_editing():
+                            text_item.setFocus()
+                            text_item.start_editing()
+                        QTimer.singleShot(10, start_text_editing)
                 else:
                     # Start drawing with the tool
                     self._is_drawing = True
@@ -523,6 +611,12 @@ class LaserCanvas(QGraphicsView):
             self._is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
+        
+        # Reset dragging flag for text items when mouse is released
+        from ..graphics.text_item import EditableTextItem
+        for item in self.scene.selectedItems():
+            if isinstance(item, EditableTextItem) and hasattr(item, '_is_dragging'):
+                item._is_dragging = False
         
         if self._is_drawing:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -644,16 +738,50 @@ class LaserCanvas(QGraphicsView):
             if isinstance(item, EditableTextItem):
                 shape = item.data(0)
                 layer = item.data(1)
+                # Also try to get shape from text_item's internal reference
+                if not shape and hasattr(item, '_text_shape'):
+                    shape = item._text_shape
+                # Try to find layer from document if not stored
+                if not layer:
+                    for doc_layer in self.document.layers:
+                        if shape and shape in doc_layer.shapes:
+                            layer = doc_layer
+                            break
+                
                 if shape and layer:
                     shapes_to_remove.append((shape, layer))
                     items_to_delete.append(item)
+                elif shape:
+                    # Shape exists but no layer - try to find it
+                    for doc_layer in self.document.layers:
+                        if shape in doc_layer.shapes:
+                            shapes_to_remove.append((shape, doc_layer))
+                            items_to_delete.append(item)
+                            break
             else:
                 # Handle regular ShapeGraphicsItem
                 shape = item.data(0)
                 layer = item.data(1)
+                # Also try to get shape from ShapeGraphicsItem
+                if not shape and hasattr(item, 'shape_ref'):
+                    shape = item.shape_ref
+                # Try to find layer from document if not stored
+                if not layer and shape:
+                    for doc_layer in self.document.layers:
+                        if shape in doc_layer.shapes:
+                            layer = doc_layer
+                            break
+                
                 if shape and layer:
                     shapes_to_remove.append((shape, layer))
                     items_to_delete.append(item)
+                elif shape:
+                    # Shape exists but no layer - try to find it
+                    for doc_layer in self.document.layers:
+                        if shape in doc_layer.shapes:
+                            shapes_to_remove.append((shape, doc_layer))
+                            items_to_delete.append(item)
+                            break
         
         # Remove shapes from layers
         for shape, layer in shapes_to_remove:
@@ -662,13 +790,16 @@ class LaserCanvas(QGraphicsView):
         
         # Remove items from scene
         for item in items_to_delete:
-            self.scene.removeItem(item)
+            if item in self.scene.items():
+                self.scene.removeItem(item)
         
         # Clear selection
         self.scene.clearSelection()
         
         self._update_view()
         self._update_selection()
+        # Emit signal to refresh layers panel
+        self.selection_changed.emit([])
     
     def select_all(self):
         """Select all shapes."""
@@ -822,6 +953,8 @@ class LaserCanvas(QGraphicsView):
             if shape:
                 self._active_layer.add_shape(shape)
                 self._update_view()
+                # Emit signal to refresh layers panel
+                self.selection_changed.emit([])
             
             # Remove temporary item
             if self._temp_item:
@@ -873,6 +1006,8 @@ class LaserCanvas(QGraphicsView):
             if shape:
                 self._active_layer.add_shape(shape)
                 self._update_view()
+                # Emit signal to refresh layers panel
+                self.selection_changed.emit([])
             
             # Clean up
             self._current_drawing_tool.cancel_drawing(self.scene)
@@ -942,8 +1077,8 @@ class LaserCanvas(QGraphicsView):
         
         # Only create/update shape if text is not empty
         if text and text.strip():
-            # Ensure we have an active layer
-            if not self._active_layer:
+            # Ensure we have an active layer that's in the document
+            if not self._active_layer or self._active_layer not in self.document.layers:
                 if self.document.layers:
                     self._active_layer = self.document.layers[0]
                 else:
@@ -952,7 +1087,11 @@ class LaserCanvas(QGraphicsView):
             
             # Get or create text shape
             text_shape = text_item.data(0)  # Get existing shape if any
-            layer = text_item.data(1) or self._active_layer
+            layer = text_item.data(1)
+            
+            # Ensure layer is in document
+            if layer is None or layer not in self.document.layers:
+                layer = self._active_layer
             
             if text_shape and isinstance(text_shape, TextShape):
                 # Update existing shape
@@ -983,22 +1122,35 @@ class LaserCanvas(QGraphicsView):
                 )
                 text_shape.visible = True  # Ensure it's visible
                 layer.add_shape(text_shape)
+                print(f"DEBUG: Added text shape '{text}' to layer '{layer.name}' (layer has {len(layer.shapes)} shapes)")
             
-            # Store reference to shape in item
+            # Store reference to shape in item (CRITICAL for deletion and G-code generation)
             text_item.set_text_shape(text_shape)
             text_item.setData(0, text_shape)  # Store shape reference
             text_item.setData(1, layer)  # Store layer reference
             
-            # Update view to ensure everything is synced
-            self._update_view()
+            # Ensure the item is selectable and movable
+            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+            
+            # Don't call _update_view() here - it can cause duplication
+            # The view is already correct since we're updating the existing item
+            # Only update if the shape wasn't in the layer before
+            if text_shape not in layer.shapes:
+                # Shape was just added - need to sync view
+                self._update_view()
+                # Emit signal to refresh layers panel
+                self.selection_changed.emit([])
         else:
             # Empty text - remove shape if it exists
             text_shape = text_item.data(0)
             layer = text_item.data(1)
             if text_shape and layer:
                 layer.remove_shape(text_shape)
+            # Remove item from scene
+            if text_item in self.scene.items():
                 self.scene.removeItem(text_item)
-                self._update_view()
+            self._update_view()
         
         # Clean up drawing state
         if text_item == self._temp_item:

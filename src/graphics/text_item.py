@@ -44,6 +44,7 @@ class EditableTextItem(QGraphicsTextItem):
         self._is_editing = False
         self._original_text = text
         self._text_shape: Optional[Text] = None  # Reference to Text shape if created
+        self._is_dragging = False  # Track if item is being dragged
         
         # Set font
         font = QFont(font_family, int(font_size))
@@ -210,13 +211,23 @@ class EditableTextItem(QGraphicsTextItem):
     
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         """Handle item changes (position, selection, etc.)."""
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            # Track that we're starting to drag
+            if not self._is_dragging:
+                self._is_dragging = True
+        elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # Update shape position when item is moved
             if self._text_shape:
                 new_pos = self.pos()
                 self._text_shape.position = Point(new_pos.x(), new_pos.y())
                 # Invalidate cache so paths are recalculated
                 self._text_shape.invalidate_cache()
+                # Don't trigger view update during drag - only update shape position
+                # The view will sync when drag finishes
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            # When selection changes (drag ends), reset dragging flag
+            if not value:  # Item was deselected
+                self._is_dragging = False
         
         return super().itemChange(change, value)
     

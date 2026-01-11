@@ -4,15 +4,17 @@ Selection Handling for LaserBurn
 Manages selection state, selection handles, and selection operations.
 """
 
-from typing import List, Set, Optional
-from PyQt6.QtCore import QRectF, QPointF, pyqtSignal, QObject
+from typing import List, Set, Optional, Union
+from PyQt6.QtCore import QRectF, QPointF, pyqtSignal, QObject, Qt
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsScene
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor
 
 from ..core.shapes import Shape, Point, BoundingBox
 from .transform import TransformManager
 from .items import ShapeGraphicsItem, SelectionHandleItem
-from .items import ShapeGraphicsItem, SelectionHandleItem
+
+# Type alias for items that can be selected
+SelectableItem = Union[ShapeGraphicsItem, 'EditableTextItem']
 
 
 class SelectionManager(QObject):
@@ -39,7 +41,7 @@ class SelectionManager(QObject):
         super().__init__()
         
         self.scene = scene
-        self._selected_items: Set[ShapeGraphicsItem] = set()
+        self._selected_items: Set[QGraphicsItem] = set()  # Can be ShapeGraphicsItem or EditableTextItem
         self._selected_shapes: List[Shape] = []
         self._handles: List[SelectionHandleItem] = []
         self._show_handles = True
@@ -53,6 +55,22 @@ class SelectionManager(QObject):
         self._is_selecting = False
         self._select_start: Optional[QPointF] = None
     
+    def _get_shape_from_item(self, item: QGraphicsItem) -> Optional[Shape]:
+        """Get the Shape from a graphics item."""
+        # Try EditableTextItem first
+        if hasattr(item, '_text_shape') and item._text_shape:
+            return item._text_shape
+        # Try ShapeGraphicsItem
+        if hasattr(item, 'shape_ref') and item.shape_ref:
+            return item.shape_ref
+        # Try data
+        return item.data(0)
+    
+    def _is_selectable_item(self, item: QGraphicsItem) -> bool:
+        """Check if an item can be selected."""
+        from .text_item import EditableTextItem
+        return isinstance(item, (ShapeGraphicsItem, EditableTextItem))
+    
     def clear_selection(self):
         """Clear all selections."""
         for item in list(self._selected_items):
@@ -63,14 +81,17 @@ class SelectionManager(QObject):
         self._selected_shapes.clear()
         self.selection_changed.emit([])
     
-    def select_item(self, item: ShapeGraphicsItem, add_to_selection: bool = False):
+    def select_item(self, item: QGraphicsItem, add_to_selection: bool = False):
         """
         Select an item.
         
         Args:
-            item: Item to select
+            item: Item to select (ShapeGraphicsItem or EditableTextItem)
             add_to_selection: If True, add to existing selection; otherwise replace
         """
+        if not self._is_selectable_item(item):
+            return
+        
         if not add_to_selection:
             self.clear_selection()
         
@@ -78,7 +99,7 @@ class SelectionManager(QObject):
             item.setSelected(True)
             self._selected_items.add(item)
             
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 self._selected_shapes.append(shape)
             
@@ -87,7 +108,7 @@ class SelectionManager(QObject):
             
             self.selection_changed.emit(self._selected_shapes.copy())
     
-    def deselect_item(self, item: ShapeGraphicsItem):
+    def deselect_item(self, item: QGraphicsItem):
         """
         Deselect an item.
         
@@ -98,7 +119,7 @@ class SelectionManager(QObject):
             item.setSelected(False)
             self._selected_items.discard(item)
             
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape and shape in self._selected_shapes:
                 self._selected_shapes.remove(shape)
             
@@ -115,7 +136,7 @@ class SelectionManager(QObject):
         self.clear_selection()
         
         for item in self.scene.items():
-            if isinstance(item, ShapeGraphicsItem):
+            if self._is_selectable_item(item):
                 self.select_item(item, add_to_selection=True)
     
     def select_in_rect(self, rect: QRectF, add_to_selection: bool = False):
@@ -131,14 +152,14 @@ class SelectionManager(QObject):
         
         items_in_rect = self.scene.items(rect)
         for item in items_in_rect:
-            if isinstance(item, ShapeGraphicsItem):
+            if self._is_selectable_item(item):
                 self.select_item(item, add_to_selection=True)
     
     def get_selected_shapes(self) -> List[Shape]:
         """Get list of currently selected shapes."""
         return self._selected_shapes.copy()
     
-    def get_selected_items(self) -> List[ShapeGraphicsItem]:
+    def get_selected_items(self) -> List[QGraphicsItem]:
         """Get list of currently selected graphics items."""
         return list(self._selected_items)
     
@@ -233,12 +254,12 @@ class SelectionManager(QObject):
         self._is_selecting = False
         self._select_start = None
     
-    def _add_handles(self, item: ShapeGraphicsItem):
+    def _add_handles(self, item: QGraphicsItem):
         """
         Add selection handles to an item.
         
         Args:
-            item: Item to add handles to
+            item: Item to add handles to (ShapeGraphicsItem or EditableTextItem)
         """
         # Get bounding box
         bounds = item.boundingRect()

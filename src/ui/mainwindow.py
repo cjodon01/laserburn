@@ -561,6 +561,11 @@ class MainWindow(QMainWindow):
                 self.canvas.set_active_layer
             )
             
+            # Canvas updates refresh layers panel
+            self.canvas.selection_changed.connect(
+                lambda shapes: self.layers_panel.refresh()
+            )
+            
             # Material selection updates laser settings
             self.materials_panel.material_selected.connect(
                 self.laser_panel.apply_material
@@ -1063,13 +1068,15 @@ class MainWindow(QMainWindow):
             else:
                 return
         
-        # Get laser settings from panel
-        laser_settings = self.laser_panel.get_laser_settings()
-        
-        # Apply settings to all layers
+        # Use per-layer settings - don't override layer settings
+        # Each layer already has its own settings configured in the layers panel
+        # Only apply global settings if a layer doesn't have use_layer_settings enabled
         for layer in self.document.layers:
-            layer.laser_settings = laser_settings
-            layer.use_layer_settings = True
+            if not layer.use_layer_settings:
+                # Fallback to global settings if layer settings not enabled
+                laser_settings = self.laser_panel.get_laser_settings()
+                layer.laser_settings = laser_settings
+                layer.use_layer_settings = True
         
         # Create job with work area validation
         settings = GCodeSettings()

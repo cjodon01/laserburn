@@ -7,6 +7,7 @@ Converts vector paths to G-code for GRBL and compatible controllers.
 from typing import List, Optional
 from dataclasses import dataclass
 from enum import Enum
+import math
 
 from ..core.shapes import Point, Shape, LaserSettings
 from ..core.document import Document
@@ -106,6 +107,14 @@ class GCodeGenerator:
         if document.height > self.settings.work_area_y:
             warnings.append(f"Document height ({document.height:.2f}mm) exceeds machine Y limit ({self.settings.work_area_y:.2f}mm)")
         
+        # Count total visible shapes for debugging
+        total_shapes = 0
+        for layer in document.layers:
+            if layer.visible:
+                for shape in layer.shapes:
+                    if shape.visible:
+                        total_shapes += 1
+        
         # Check all shapes' bounding boxes
         for layer in document.layers:
             if not layer.visible:
@@ -113,11 +122,14 @@ class GCodeGenerator:
             for shape in layer.shapes:
                 if not shape.visible:
                     continue
-                bbox = shape.get_bounding_box()
-                if bbox.max_x > self.settings.work_area_x:
-                    warnings.append(f"Shape '{shape.name}' extends beyond X limit (max: {bbox.max_x:.2f}mm, limit: {self.settings.work_area_x:.2f}mm)")
-                if bbox.max_y > self.settings.work_area_y:
-                    warnings.append(f"Shape '{shape.name}' extends beyond Y limit (max: {bbox.max_y:.2f}mm, limit: {self.settings.work_area_y:.2f}mm)")
+                try:
+                    bbox = shape.get_bounding_box()
+                    if bbox.max_x > self.settings.work_area_x:
+                        warnings.append(f"Shape '{shape.name}' extends beyond X limit (max: {bbox.max_x:.2f}mm, limit: {self.settings.work_area_x:.2f}mm)")
+                    if bbox.max_y > self.settings.work_area_y:
+                        warnings.append(f"Shape '{shape.name}' extends beyond Y limit (max: {bbox.max_y:.2f}mm, limit: {self.settings.work_area_y:.2f}mm)")
+                except Exception as e:
+                    warnings.append(f"Could not get bounding box for shape: {e}")
         
         # Header
         self._add_header(document)
@@ -188,15 +200,26 @@ class GCodeGenerator:
         """Process all shapes in a layer."""
         self._emit(f"; Layer: {layer.name}")
         
+        # Get layer settings
+        layer_settings = layer.laser_settings if layer.use_layer_settings else None
+        
         # Collect all paths from layer
         all_paths = []
         path_settings = []
+        fill_paths = []  # For fill patterns
+        fill_settings = []  # Settings for fill paths
         
         for shape in layer.shapes:
             if not shape.visible:
                 continue
             
             try:
+                # Get settings for this shape
+                if layer.use_layer_settings:
+                    settings = layer.laser_settings
+                else:
+                    settings = shape.laser_settings
+                
                 paths = shape.get_paths()
                 # Filter out empty paths
                 valid_paths = [p for p in paths if p and len(p) > 0]
@@ -206,13 +229,33 @@ class GCodeGenerator:
                     # Skip silently or log a warning
                     continue
                 
-                for path in valid_paths:
-                    all_paths.append(path)
-                    # Use layer settings if enabled, else shape settings
-                    if layer.use_layer_settings:
-                        path_settings.append(layer.laser_settings)
-                    else:
-                        path_settings.append(shape.laser_settings)
+                # Check if fill is enabled
+                if settings.fill_enabled:
+                    # Generate fill patterns for closed paths
+                    for path in valid_paths:
+                        if len(path) >= 3:  # Need at least 3 points for a closed shape
+                            # Check if path is closed (first and last points are same or close)
+                            is_closed = (abs(path[0].x - path[-1].x) < 0.01 and 
+                                       abs(path[0].y - path[-1].y) < 0.01)
+                            
+                            if is_closed:
+                                # Generate fill pattern
+                                fill_lines = self._generate_fill_pattern(path, settings)
+                                fill_paths.extend(fill_lines)
+                                fill_settings.extend([settings] * len(fill_lines))
+                            else:
+                                # Not closed - add as outline
+                                all_paths.append(path)
+                                path_settings.append(settings)
+                        else:
+                            # Too few points - add as outline
+                            all_paths.append(path)
+                            path_settings.append(settings)
+                else:
+                    # No fill - add as outline paths
+                    for path in valid_paths:
+                        all_paths.append(path)
+                        path_settings.append(settings)
             except Exception as e:
                 # Log error but continue processing other shapes
                 print(f"Error processing shape {shape.name if hasattr(shape, 'name') else 'unknown'}: {e}")
@@ -220,15 +263,30 @@ class GCodeGenerator:
                 traceback.print_exc()
                 continue
         
-        # Optimize path order if enabled
-        if self.settings.optimize_paths and all_paths:
-            start = Point(self._current_x, self._current_y)
-            all_paths = optimize_paths(all_paths, start)
+        # Process outlines first
+        if all_paths:
+            # Optimize path order if enabled
+            if self.settings.optimize_paths:
+                start = Point(self._current_x, self._current_y)
+                all_paths = optimize_paths(all_paths, start)
+            
+            # Cut each outline path
+            for i, path in enumerate(all_paths):
+                settings = path_settings[min(i, len(path_settings)-1)]
+                self._cut_path(path, settings)
         
-        # Cut each path
-        for i, path in enumerate(all_paths):
-            settings = path_settings[min(i, len(path_settings)-1)]
-            self._cut_path(path, settings)
+        # Process fill patterns
+        if fill_paths:
+            self._emit("; Fill patterns")
+            # Optimize fill path order if enabled
+            if self.settings.optimize_paths:
+                start = Point(self._current_x, self._current_y)
+                fill_paths = optimize_paths(fill_paths, start)
+            
+            # Cut each fill line
+            for i, fill_line in enumerate(fill_paths):
+                settings = fill_settings[min(i, len(fill_settings)-1)]
+                self._cut_path(fill_line, settings)
         
         self._emit("")
     
@@ -279,6 +337,180 @@ class GCodeGenerator:
         laser_x = canvas_point.x  # Canvas X (right) → Laser X (right)
         laser_y = document_height - canvas_point.y  # Canvas Y (down) → Laser Y (up, flipped)
         return Point(laser_x, laser_y)
+    
+    def _generate_fill_pattern(self, closed_path: List[Point], settings: LaserSettings) -> List[List[Point]]:
+        """
+        Generate fill pattern lines for a closed path.
+        
+        Args:
+            closed_path: Closed path (polygon) to fill
+            settings: Laser settings with fill parameters
+        
+        Returns:
+            List of line segments for filling
+        """
+        if len(closed_path) < 3:
+            return []
+        
+        # Get bounding box
+        min_x = min(p.x for p in closed_path)
+        max_x = max(p.x for p in closed_path)
+        min_y = min(p.y for p in closed_path)
+        max_y = max(p.y for p in closed_path)
+        
+        fill_lines = []
+        pattern = settings.fill_pattern
+        spacing = settings.line_interval
+        angle = math.radians(settings.fill_angle)
+        
+        if pattern == "horizontal":
+            fill_lines = self._generate_horizontal_fill(closed_path, min_y, max_y, spacing)
+        elif pattern == "vertical":
+            fill_lines = self._generate_vertical_fill(closed_path, min_x, max_x, spacing)
+        elif pattern == "crosshatch":
+            # Generate both horizontal and vertical
+            h_lines = self._generate_horizontal_fill(closed_path, min_y, max_y, spacing)
+            v_lines = self._generate_vertical_fill(closed_path, min_x, max_x, spacing)
+            fill_lines = h_lines + v_lines
+        elif pattern == "diagonal":
+            fill_lines = self._generate_diagonal_fill(closed_path, min_x, max_x, min_y, max_y, spacing, angle)
+        else:
+            # Default to horizontal
+            fill_lines = self._generate_horizontal_fill(closed_path, min_y, max_y, spacing)
+        
+        return fill_lines
+    
+    def _generate_horizontal_fill(self, path: List[Point], min_y: float, max_y: float, spacing: float) -> List[List[Point]]:
+        """Generate horizontal fill lines."""
+        fill_lines = []
+        y = min_y
+        line_num = 0
+        
+        while y <= max_y:
+            intersections = self._find_line_intersections(path, y, horizontal=True)
+            intersections.sort()
+            
+            # Pair up intersections (in-out pattern)
+            for i in range(0, len(intersections) - 1, 2):
+                if i + 1 < len(intersections):
+                    x1 = intersections[i]
+                    x2 = intersections[i + 1]
+                    
+                    # Alternate direction for efficiency
+                    if line_num % 2 == 1:
+                        fill_lines.append([Point(x2, y), Point(x1, y)])
+                    else:
+                        fill_lines.append([Point(x1, y), Point(x2, y)])
+            
+            y += spacing
+            line_num += 1
+        
+        return fill_lines
+    
+    def _generate_vertical_fill(self, path: List[Point], min_x: float, max_x: float, spacing: float) -> List[List[Point]]:
+        """Generate vertical fill lines."""
+        fill_lines = []
+        x = min_x
+        line_num = 0
+        
+        while x <= max_x:
+            intersections = self._find_line_intersections(path, x, horizontal=False)
+            intersections.sort()
+            
+            # Pair up intersections (in-out pattern)
+            for i in range(0, len(intersections) - 1, 2):
+                if i + 1 < len(intersections):
+                    y1 = intersections[i]
+                    y2 = intersections[i + 1]
+                    
+                    # Alternate direction for efficiency
+                    if line_num % 2 == 1:
+                        fill_lines.append([Point(x, y2), Point(x, y1)])
+                    else:
+                        fill_lines.append([Point(x, y1), Point(x, y2)])
+            
+            x += spacing
+            line_num += 1
+        
+        return fill_lines
+    
+    def _generate_diagonal_fill(self, path: List[Point], min_x: float, max_x: float, 
+                                 min_y: float, max_y: float, spacing: float, angle: float) -> List[List[Point]]:
+        """Generate diagonal fill lines."""
+        # For diagonal, we'll use a simplified approach
+        # Rotate the bounding box and use horizontal scanlines
+        fill_lines = []
+        
+        # Calculate rotated bounding box
+        center = Point((min_x + max_x) / 2, (min_y + max_y) / 2)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        
+        # For now, use horizontal lines with spacing adjusted for angle
+        # A more sophisticated implementation would rotate the scanline
+        diag_spacing = spacing / abs(cos_a) if abs(cos_a) > 0.001 else spacing / abs(sin_a) if abs(sin_a) > 0.001 else spacing
+        
+        y = min_y
+        while y <= max_y:
+            # Use horizontal scanlines (simplified diagonal)
+            intersections = self._find_line_intersections(path, y, horizontal=True)
+            intersections.sort()
+            
+            for i in range(0, len(intersections) - 1, 2):
+                if i + 1 < len(intersections):
+                    x1 = intersections[i]
+                    x2 = intersections[i + 1]
+                    # For diagonal, rotate the line endpoints around center
+                    p1 = Point(x1, y).rotate(angle, center)
+                    p2 = Point(x2, y).rotate(angle, center)
+                    fill_lines.append([p1, p2])
+            
+            y += diag_spacing
+        
+        return fill_lines
+    
+    def _find_line_intersections(self, path: List[Point], value: float, horizontal: bool = True) -> List[float]:
+        """
+        Find intersections of a scanline with a closed path.
+        
+        Args:
+            path: Closed path
+            value: Y coordinate (if horizontal) or X coordinate (if vertical)
+            horizontal: True for horizontal scanline, False for vertical
+        
+        Returns:
+            List of intersection coordinates (X if horizontal, Y if vertical)
+        """
+        intersections = []
+        
+        # Close the path if needed
+        closed_path = list(path)
+        if len(closed_path) > 0:
+            if (abs(closed_path[0].x - closed_path[-1].x) > 0.01 or 
+                abs(closed_path[0].y - closed_path[-1].y) > 0.01):
+                closed_path.append(closed_path[0])
+        
+        # Check each edge
+        for i in range(len(closed_path) - 1):
+            p1 = closed_path[i]
+            p2 = closed_path[i + 1]
+            
+            if horizontal:
+                # Check if edge crosses this Y
+                if (p1.y <= value <= p2.y) or (p2.y <= value <= p1.y):
+                    if abs(p1.y - p2.y) > 0.001:  # Avoid division by zero
+                        t = (value - p1.y) / (p2.y - p1.y)
+                        x = p1.x + t * (p2.x - p1.x)
+                        intersections.append(x)
+            else:
+                # Check if edge crosses this X
+                if (p1.x <= value <= p2.x) or (p2.x <= value <= p1.x):
+                    if abs(p1.x - p2.x) > 0.001:  # Avoid division by zero
+                        t = (value - p1.x) / (p2.x - p1.x)
+                        y = p1.y + t * (p2.y - p1.y)
+                        intersections.append(y)
+        
+        return intersections
     
     def _cut_path(self, path: List[Point], settings: LaserSettings):
         """Generate G-code for a single path."""

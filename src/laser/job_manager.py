@@ -120,6 +120,33 @@ class JobManager:
         generator = GCodeGenerator(settings or GCodeSettings())
         gcode, warnings = generator.generate(document)
         
+        # Apply cylinder compensation if enabled
+        if (document.cylinder_params and 
+            document.cylinder_compensate_power):
+            from ..image.cylinder_warp import apply_cylinder_compensation_to_gcode
+            
+            # Convert gcode string to lines
+            gcode_lines = gcode.split('\n')
+            
+            # Get design center for compensation
+            bounds = document.get_design_bounds()
+            design_center_x = (bounds.min_x + bounds.max_x) / 2 if bounds else 0
+            
+            # Get base power from settings (default to 255)
+            base_power = 255  # Could get from GCodeSettings or layer settings
+            
+            # Apply compensation
+            gcode_lines = apply_cylinder_compensation_to_gcode(
+                gcode_lines,
+                document.cylinder_params,
+                design_center_x=design_center_x,
+                base_power=base_power,
+                include_z=document.cylinder_compensate_z
+            )
+            
+            # Convert back to string
+            gcode = '\n'.join(gcode_lines)
+        
         # Log warnings if any
         if warnings:
             print("G-code generation warnings:")

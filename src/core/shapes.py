@@ -89,6 +89,11 @@ class LaserSettings:
     
     # Operation type
     operation: str = "cut"       # "cut", "engrave", "fill"
+    
+    # Fill pattern settings
+    fill_enabled: bool = False   # Enable fill pattern
+    fill_pattern: str = "horizontal"  # "horizontal", "vertical", "crosshatch", "diagonal"
+    fill_angle: float = 0.0      # Fill angle in degrees (for diagonal patterns)
 
 
 class Shape(ABC):
@@ -447,15 +452,19 @@ class Text(Shape):
         This uses Qt's font rendering to convert text outlines to paths.
         The text is rendered as a QPainterPath, then converted to our Point format.
         """
+        # Check if text is empty
+        if not self.text or not self.text.strip():
+            return []
+        
         # If cached, apply transforms to each path
         if self._cached_paths is not None:
             result = []
             for path_points in self._cached_paths:
-                if path_points:
+                if path_points and len(path_points) > 0:
                     transformed = self.apply_transform(path_points)
-                    if transformed:
+                    if transformed and len(transformed) > 0:
                         result.append(transformed)
-            return result if result else [[]]
+            return result if result else []
         
         # Import Qt here to avoid circular dependencies
         from PyQt6.QtGui import QFont, QPainterPath, QFontMetrics
@@ -476,11 +485,11 @@ class Text(Shape):
         # Apply transforms to each path
         result = []
         for path_points in self._cached_paths:
-            if path_points:
+            if path_points and len(path_points) > 0:
                 transformed = self.apply_transform(path_points)
-                if transformed:
+                if transformed and len(transformed) > 0:
                     result.append(transformed)
-        return result if result else [[]]
+        return result if result else []
     
     def _qpath_to_paths(self, qpath) -> List[List[Point]]:
         """Convert QPainterPath to list of point lists."""

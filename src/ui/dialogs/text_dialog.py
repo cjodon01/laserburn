@@ -94,3 +94,4 @@ class TextDialog(QDialog):
         """Check if italic is selected."""
         return self.italic_check.isChecked()
 
+

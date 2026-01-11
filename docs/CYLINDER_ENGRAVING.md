@@ -671,3 +671,4 @@ def generate_cylinder_gcode(paths, params: CylinderParams,
 - [ ] Focus compensation for Z-axis equipped lasers
 - [ ] Material-specific power curves
 
+

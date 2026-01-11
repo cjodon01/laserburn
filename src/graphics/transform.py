@@ -8,8 +8,9 @@ Handles transformation of shapes including:
 - Translation (movement)
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from PyQt6.QtCore import QPointF, QRectF
+from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6.QtGui import QTransform
 import math
 
@@ -35,7 +36,28 @@ class TransformManager:
         self._transform_center: Optional[QPointF] = None
         self._is_transforming = False
     
-    def start_transform(self, items: List[ShapeGraphicsItem], handle_pos: QPointF, 
+    def _get_shape_from_item(self, item: QGraphicsItem) -> Optional[Shape]:
+        """Get the Shape from a graphics item (ShapeGraphicsItem or EditableTextItem)."""
+        # Try ShapeGraphicsItem.shape_ref
+        if hasattr(item, 'shape_ref') and item.shape_ref:
+            return item.shape_ref
+        # Try EditableTextItem._text_shape
+        if hasattr(item, '_text_shape') and item._text_shape:
+            return item._text_shape
+        # Try item data
+        return item.data(0)
+    
+    def _update_item_from_shape(self, item: QGraphicsItem, shape: Shape):
+        """Update a graphics item after its shape has been transformed."""
+        # For ShapeGraphicsItem
+        if hasattr(item, 'update_from_shape'):
+            item.update_from_shape()
+        # For EditableTextItem - update position
+        elif hasattr(item, 'setPos'):
+            from PyQt6.QtCore import QPointF
+            item.setPos(QPointF(shape.position.x, shape.position.y))
+    
+    def start_transform(self, items: List[QGraphicsItem], handle_pos: QPointF, 
                        handle_type: str, center: Optional[QPointF] = None):
         """
         Start a transformation operation.
@@ -55,7 +77,7 @@ class TransformManager:
         # Calculate selection bounds
         all_points = []
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 paths = shape.get_paths()
                 for path in paths:
@@ -79,7 +101,7 @@ class TransformManager:
         else:
             self._transform_center = QPointF(0, 0)
     
-    def update_transform(self, items: List[ShapeGraphicsItem], current_pos: QPointF, 
+    def update_transform(self, items: List[QGraphicsItem], current_pos: QPointF, 
                         handle_type: str) -> bool:
         """
         Update transformation based on handle movement.
@@ -104,7 +126,7 @@ class TransformManager:
         
         return False
     
-    def _update_scale_corner(self, items: List[ShapeGraphicsItem], current_pos: QPointF) -> bool:
+    def _update_scale_corner(self, items: List[QGraphicsItem], current_pos: QPointF) -> bool:
         """Update scale transformation via corner handle."""
         if not self._transform_center or not self._transform_start_pos:
             return False
@@ -124,7 +146,7 @@ class TransformManager:
         
         # Apply scale to all selected shapes
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 # Get original bounds
                 bounds = shape.get_bounding_box()
@@ -135,6 +157,10 @@ class TransformManager:
                 shape.scale_x *= scale_x
                 shape.scale_y *= scale_y
                 
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
+                
                 # Update position to maintain center
                 new_bounds = shape.get_bounding_box()
                 new_center_x = (new_bounds.min_x + new_bounds.max_x) / 2
@@ -144,13 +170,13 @@ class TransformManager:
                 shape.position.y += (center_y - new_center_y)
                 
                 # Update graphics item
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
         
         # Update start position for next frame
         self._transform_start_pos = current_pos
         return True
     
-    def _update_scale_edge(self, items: List[ShapeGraphicsItem], current_pos: QPointF) -> bool:
+    def _update_scale_edge(self, items: List[QGraphicsItem], current_pos: QPointF) -> bool:
         """Update scale transformation via edge handle."""
         if not self._transform_center or not self._transform_start_pos:
             return False
@@ -177,7 +203,7 @@ class TransformManager:
         
         # Apply scale to all selected shapes
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 bounds = shape.get_bounding_box()
                 center_x = (bounds.min_x + bounds.max_x) / 2
@@ -186,6 +212,10 @@ class TransformManager:
                 shape.scale_x *= scale_x
                 shape.scale_y *= scale_y
                 
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
+                
                 new_bounds = shape.get_bounding_box()
                 new_center_x = (new_bounds.min_x + new_bounds.max_x) / 2
                 new_center_y = (new_bounds.min_y + new_bounds.max_y) / 2
@@ -193,12 +223,12 @@ class TransformManager:
                 shape.position.x += (center_x - new_center_x)
                 shape.position.y += (center_y - new_center_y)
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
         
         self._transform_start_pos = current_pos
         return True
     
-    def _update_rotation(self, items: List[ShapeGraphicsItem], current_pos: QPointF) -> bool:
+    def _update_rotation(self, items: List[QGraphicsItem], current_pos: QPointF) -> bool:
         """Update rotation transformation."""
         if not self._transform_center or not self._transform_start_pos:
             return False
@@ -218,10 +248,14 @@ class TransformManager:
         
         # Apply rotation to all selected shapes
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 # Rotate around transform center
                 shape.rotation += rotation_delta
+                
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
                 
                 # Update position to rotate around center
                 bounds = shape.get_bounding_box()
@@ -243,7 +277,7 @@ class TransformManager:
                 shape.position.x += (new_dx - dx)
                 shape.position.y += (new_dy - dy)
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
         
         self._transform_start_pos = current_pos
         return True
@@ -259,7 +293,7 @@ class TransformManager:
         """Cancel the current transformation."""
         self.finish_transform()
     
-    def mirror_horizontal(self, items: List[ShapeGraphicsItem], center_x: Optional[float] = None):
+    def mirror_horizontal(self, items: List[QGraphicsItem], center_x: Optional[float] = None):
         """
         Mirror shapes horizontally (flip left-right).
         
@@ -274,7 +308,7 @@ class TransformManager:
         if center_x is None:
             all_points = []
             for item in items:
-                shape = item.shape_ref
+                shape = self._get_shape_from_item(item)
                 if shape:
                     paths = shape.get_paths()
                     for path in paths:
@@ -287,10 +321,14 @@ class TransformManager:
         
         # Apply mirror to each shape
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 # Mirror scale
                 shape.scale_x *= -1
+                
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
                 
                 # Mirror position
                 bounds = shape.get_bounding_box()
@@ -298,9 +336,9 @@ class TransformManager:
                 offset = 2 * (center_x - shape_center_x)
                 shape.position.x += offset
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
     
-    def mirror_vertical(self, items: List[ShapeGraphicsItem], center_y: Optional[float] = None):
+    def mirror_vertical(self, items: List[QGraphicsItem], center_y: Optional[float] = None):
         """
         Mirror shapes vertically (flip top-bottom).
         
@@ -315,7 +353,7 @@ class TransformManager:
         if center_y is None:
             all_points = []
             for item in items:
-                shape = item.shape_ref
+                shape = self._get_shape_from_item(item)
                 if shape:
                     paths = shape.get_paths()
                     for path in paths:
@@ -328,10 +366,14 @@ class TransformManager:
         
         # Apply mirror to each shape
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 # Mirror scale
                 shape.scale_y *= -1
+                
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
                 
                 # Mirror position
                 bounds = shape.get_bounding_box()
@@ -339,9 +381,9 @@ class TransformManager:
                 offset = 2 * (center_y - shape_center_y)
                 shape.position.y += offset
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
     
-    def rotate(self, items: List[ShapeGraphicsItem], angle: float, 
+    def rotate(self, items: List[QGraphicsItem], angle: float, 
               center: Optional[QPointF] = None):
         """
         Rotate shapes by a specific angle.
@@ -358,7 +400,7 @@ class TransformManager:
         if center is None:
             all_points = []
             for item in items:
-                shape = item.shape_ref
+                shape = self._get_shape_from_item(item)
                 if shape:
                     paths = shape.get_paths()
                     for path in paths:
@@ -376,10 +418,14 @@ class TransformManager:
         sin_r = math.sin(angle)
         
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 # Add rotation
                 shape.rotation += angle
+                
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
                 
                 # Rotate position around center
                 bounds = shape.get_bounding_box()
@@ -397,9 +443,9 @@ class TransformManager:
                 shape.position.x += (new_dx - dx)
                 shape.position.y += (new_dy - dy)
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
     
-    def scale(self, items: List[ShapeGraphicsItem], scale_x: float, scale_y: float,
+    def scale(self, items: List[QGraphicsItem], scale_x: float, scale_y: float,
              center: Optional[QPointF] = None):
         """
         Scale shapes by specific factors.
@@ -417,7 +463,7 @@ class TransformManager:
         if center is None:
             all_points = []
             for item in items:
-                shape = item.shape_ref
+                shape = self._get_shape_from_item(item)
                 if shape:
                     paths = shape.get_paths()
                     for path in paths:
@@ -432,7 +478,7 @@ class TransformManager:
         
         # Apply scale to each shape
         for item in items:
-            shape = item.shape_ref
+            shape = self._get_shape_from_item(item)
             if shape:
                 bounds = shape.get_bounding_box()
                 shape_center_x = (bounds.min_x + bounds.max_x) / 2
@@ -442,6 +488,10 @@ class TransformManager:
                 shape.scale_x *= scale_x
                 shape.scale_y *= scale_y
                 
+                # Invalidate cache for text shapes
+                if hasattr(shape, 'invalidate_cache'):
+                    shape.invalidate_cache()
+                
                 # Adjust position to maintain center
                 new_bounds = shape.get_bounding_box()
                 new_center_x = (new_bounds.min_x + new_bounds.max_x) / 2
@@ -450,5 +500,6 @@ class TransformManager:
                 shape.position.x += (shape_center_x - new_center_x)
                 shape.position.y += (shape_center_y - new_center_y)
                 
-                item.update_from_shape()
+                self._update_item_from_shape(item, shape)
+
 

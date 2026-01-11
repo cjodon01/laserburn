@@ -21,9 +21,9 @@ from enum import Enum
 
 from ..core.document import Document
 from ..core.layer import Layer
-from ..core.shapes import Shape, Point, Rectangle, Ellipse, Path, Text
+from ..core.shapes import Shape, Point, Rectangle, Ellipse, Path, Text, ImageShape
 from ..graphics import (
-    ShapeGraphicsItem, SelectionManager,
+    ShapeGraphicsItem, SelectionManager, ImageGraphicsItem,
     ToolType, create_tool, DrawingTool, PolygonTool
 )
 from ..graphics.items import SelectionHandleItem
@@ -420,12 +420,18 @@ class LaserCanvas(QGraphicsView):
     
     def _create_graphics_item(self, shape: Shape, 
                               pen: QPen) -> Optional[QGraphicsItem]:
-        """Create a QGraphicsItem from a Shape using ShapeGraphicsItem."""
+        """Create a QGraphicsItem from a Shape using appropriate item type."""
         try:
+            # Use ImageGraphicsItem for ImageShape to display actual image
+            if isinstance(shape, ImageShape):
+                item = ImageGraphicsItem(shape)
+                return item
+            
+            # Use ShapeGraphicsItem for all other shapes
             item = ShapeGraphicsItem(shape, pen)
             return item
         except Exception as e:
-            print(f"Error creating ShapeGraphicsItem: {e}")
+            print(f"Error creating graphics item: {e}")
             # Fallback to old method if ShapeGraphicsItem fails
             paths = shape.get_paths()
             if not paths:

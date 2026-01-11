@@ -7,10 +7,10 @@ These items provide the visual representation and interaction capabilities.
 
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsPathItem, QStyleOptionGraphicsItem, QStyle
 from PyQt6.QtCore import QRectF, QPointF, Qt
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath, QPainterPathStroker, QMouseEvent
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath, QPainterPathStroker, QMouseEvent, QImage, QPixmap
 from typing import Optional
 
-from ..core.shapes import Shape, Point
+from ..core.shapes import Shape, Point, ImageShape
 
 
 class ShapeGraphicsItem(QGraphicsPathItem):
@@ -154,6 +154,134 @@ class ShapeGraphicsItem(QGraphicsPathItem):
     @property
     def shape_ref(self) -> Shape:
         """Get the underlying Shape object."""
+        return self._shape
+
+
+class ImageGraphicsItem(QGraphicsItem):
+    """
+    A QGraphicsItem that displays an ImageShape.
+    
+    This renders the actual image data, not just an outline.
+    """
+    
+    def __init__(self, image_shape: ImageShape, parent: Optional[QGraphicsItem] = None):
+        """
+        Create a graphics item for an image shape.
+        
+        Args:
+            image_shape: The ImageShape object to display
+            parent: Optional parent item
+        """
+        super().__init__(parent)
+        
+        self._shape = image_shape
+        self._pixmap: Optional[QPixmap] = None
+        
+        # Create the pixmap from image data
+        self._update_pixmap()
+        
+        # Make selectable and movable
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        
+        # Accept hover events for highlighting
+        self.setAcceptHoverEvents(True)
+        
+        # Store shape reference in item data
+        self.setData(0, image_shape)
+        
+        # Set position
+        self.setPos(image_shape.position.x, image_shape.position.y)
+    
+    def _update_pixmap(self):
+        """Update the QPixmap from the image shape's data."""
+        if self._shape.image_data is None:
+            self._pixmap = None
+            return
+        
+        import numpy as np
+        
+        # Get image data
+        img_data = self._shape.image_data
+        height, width = img_data.shape
+        
+        # Convert grayscale to RGBA for QImage
+        # Grayscale needs to be converted to RGB format
+        rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
+        
+        # Create QImage from numpy array
+        bytes_per_line = 3 * width
+        qimage = QImage(
+            rgb_data.tobytes(),
+            width, height,
+            bytes_per_line,
+            QImage.Format.Format_RGB888
+        )
+        
+        # Scale to display size
+        scaled_image = qimage.scaled(
+            int(self._shape.width * 3),  # Scale up for display (3 pixels per mm)
+            int(self._shape.height * 3),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        self._pixmap = QPixmap.fromImage(scaled_image)
+    
+    def boundingRect(self) -> QRectF:
+        """Return the bounding rectangle."""
+        return QRectF(0, 0, self._shape.width, self._shape.height)
+    
+    def shape(self) -> QPainterPath:
+        """Return the shape for hit testing."""
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+    
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget=None):
+        """Paint the image."""
+        rect = self.boundingRect()
+        
+        if self._pixmap and not self._pixmap.isNull():
+            # Draw the image scaled to fit
+            painter.drawPixmap(rect.toRect(), self._pixmap)
+        else:
+            # Draw placeholder if no image
+            painter.setPen(QPen(QColor(100, 100, 100), 1))
+            painter.setBrush(QBrush(QColor(60, 60, 60)))
+            painter.drawRect(rect)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Image")
+        
+        # Draw selection border
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(QPen(QColor(0, 120, 215), 2))
+            painter.setBrush(QBrush())
+            painter.drawRect(rect)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.setPen(QPen(QColor(100, 150, 255), 1))
+            painter.setBrush(QBrush())
+            painter.drawRect(rect)
+    
+    def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
+        """Handle item changes (position, selection, etc.)."""
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Update shape position when item is moved
+            if self._shape:
+                new_pos = self.pos()
+                self._shape.position = Point(new_pos.x(), new_pos.y())
+        
+        return super().itemChange(change, value)
+    
+    def update_from_shape(self):
+        """Update the graphics item when the underlying shape changes."""
+        self._update_pixmap()
+        self.setPos(self._shape.position.x, self._shape.position.y)
+        self.update()
+    
+    @property
+    def shape_ref(self) -> ImageShape:
+        """Get the underlying ImageShape object."""
         return self._shape
 
 

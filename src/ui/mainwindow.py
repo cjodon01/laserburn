@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QToolBar, QDockWidget, QStatusBar,
     QMenuBar, QMenu, QFileDialog, QMessageBox, QDialog
 )
-from PyQt6.QtCore import Qt, QSettings, QSize
+from PyQt6.QtCore import Qt, QSettings, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QActionGroup
 
 from ..core.document import Document
@@ -27,11 +27,53 @@ import traceback
 import time
 
 
+class ImageImportWorker(QThread):
+    """Worker thread for importing images without blocking UI."""
+    
+    finished = pyqtSignal(object)  # Emits Layer on success
+    error = pyqtSignal(str)  # Emits error message on failure
+    progress = pyqtSignal(int)  # Emits progress percentage
+    
+    def __init__(self, filepath: str, dpi: float = 254.0, 
+                 max_size_mm: tuple = None, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self.dpi = dpi
+        self.max_size_mm = max_size_mm
+    
+    def run(self):
+        """Run image import in background thread."""
+        try:
+            from ..io.image_importer import ImageImporter
+            
+            # Create importer - now uses ImageShape, much faster
+            importer = ImageImporter(
+                dpi=self.dpi,
+                max_size_mm=self.max_size_mm
+            )
+            
+            # Import image as ImageShape (fast - just loads the image)
+            layer = importer.import_image(self.filepath)
+            self.finished.emit(layer)
+        except Exception as e:
+            import traceback
+            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            self.error.emit(error_msg)
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
     
+    # Signal for thread-safe controller status updates
+    # This allows the GRBL background thread to safely trigger UI updates
+    controller_status_update = pyqtSignal(object)
+    
     def __init__(self):
         super().__init__()
+        
+        # Connect the controller status signal for thread-safe UI updates
+        # This must be connected before _init_laser_system registers the callback
+        self.controller_status_update.connect(self._on_controller_status)
         
         self.document = Document(name="Untitled")
         self.document.add_layer(Layer(name="Layer 1"))
@@ -42,6 +84,9 @@ class MainWindow(QMainWindow):
         # Initialize laser components
         self._controller = None
         self._job_manager = None
+        
+        # Image import worker thread
+        self._image_import_worker = None
         
         # Setup UI components
         self._create_actions()
@@ -524,8 +569,10 @@ class MainWindow(QMainWindow):
         # Create job manager
         self._job_manager = JobManager(self._controller)
         
-        # Connect controller status updates
-        self._controller.add_status_callback(self._on_controller_status)
+        # Connect controller status updates (via signal for thread safety)
+        # The callback is invoked from GRBL's background thread, so we use a signal
+        # to marshal the update to the main thread where UI updates are safe
+        self._controller.add_status_callback(self._on_controller_status_from_thread)
         
         # Connect console callback
         self._controller.add_console_callback(self._on_grbl_console_response)
@@ -574,8 +621,16 @@ class MainWindow(QMainWindow):
             print(f"Warning: Error connecting signals: {e}")
             traceback.print_exc()
     
+    def _on_controller_status_from_thread(self, status):
+        """Wrapper for controller status that safely emits to main thread.
+        
+        This is called from the GRBL background thread. It emits a signal
+        to trigger the actual UI update on the main thread.
+        """
+        self.controller_status_update.emit(status)
+    
     def _on_controller_status(self, status):
-        """Handle controller status updates."""
+        """Handle controller status updates (called on main thread via signal)."""
         self.laser_panel.update_controller_status()
         
         # Update action states
@@ -693,6 +748,8 @@ class MainWindow(QMainWindow):
     def _import_file(self, filepath: str):
         """Import a file into the document."""
         from ..io.svg_parser import SVGParser
+        from ..io.image_importer import ImageImporter
+        from ..image.dithering import DitheringMethod
         
         ext = filepath.lower().split('.')[-1]
         
@@ -727,6 +784,86 @@ class MainWindow(QMainWindow):
                 error_msg = f"Failed to import file:\n{str(e)}\n\n{traceback.format_exc()}"
                 QMessageBox.warning(self, "Import Error", error_msg)
                 self.status_bar.showMessage(f"Import failed: {e}")
+        
+        elif ext in ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'tif']:
+            # Import image in background thread to avoid freezing UI
+            self._import_image_async(filepath)
+    
+    def _import_image_async(self, filepath: str):
+        """Import an image in a background thread to avoid blocking the UI."""
+        # Don't start a new import if one is already in progress
+        if self._image_import_worker and self._image_import_worker.isRunning():
+            QMessageBox.warning(self, "Import In Progress", 
+                              "An image import is already in progress. Please wait.")
+            return
+        
+        # Show status message
+        self.status_bar.showMessage(f"Importing image: {filepath}...")
+        
+        # Calculate max size from document if available
+        max_size_mm = None
+        if hasattr(self.document, 'width') and hasattr(self.document, 'height'):
+            max_size_mm = (self.document.width, self.document.height)
+        
+        # Create and start worker thread
+        self._image_import_worker = ImageImportWorker(
+            filepath=filepath,
+            dpi=254.0,  # 254 DPI (standard laser engraving resolution)
+            max_size_mm=max_size_mm
+        )
+        
+        # Connect signals
+        self._image_import_worker.finished.connect(
+            lambda layer: self._on_image_import_finished(layer, filepath)
+        )
+        self._image_import_worker.error.connect(
+            lambda error: self._on_image_import_error(error, filepath)
+        )
+        
+        # Start the worker
+        self._image_import_worker.start()
+    
+    def _on_image_import_finished(self, layer, filepath: str):
+        """Handle successful image import completion."""
+        try:
+            # Add the imported layer to document
+            self.document.add_layer(layer)
+            
+            # Update canvas to show imported image
+            self.canvas.set_document(self.document)
+            self.layers_panel.set_document(self.document)
+            self.canvas._update_view()
+            if hasattr(self.layers_panel, 'refresh'):
+                self.layers_panel.refresh()
+            
+            # Get image info for status message
+            from pathlib import Path
+            image_name = Path(filepath).name
+            self.status_bar.showMessage(
+                f"Imported image '{image_name}' in layer '{layer.name}'"
+            )
+        except Exception as e:
+            import traceback
+            error_msg = f"Failed to add imported layer:\n{str(e)}\n\n{traceback.format_exc()}"
+            QMessageBox.warning(self, "Import Error", error_msg)
+            self.status_bar.showMessage(f"Image import failed: {e}")
+        finally:
+            # Clean up worker
+            if self._image_import_worker:
+                self._image_import_worker.deleteLater()
+                self._image_import_worker = None
+    
+    def _on_image_import_error(self, error_msg: str, filepath: str):
+        """Handle image import error."""
+        QMessageBox.warning(self, "Import Error", 
+                          f"Failed to import image:\n{filepath}\n\n{error_msg}")
+        self.status_bar.showMessage(f"Image import failed: {filepath}")
+        
+        # Clean up worker
+        if self._image_import_worker:
+            self._image_import_worker.deleteLater()
+            self._image_import_worker = None
+        
         else:
             self.status_bar.showMessage(f"Unsupported file type: {ext}")
     
@@ -1068,14 +1205,13 @@ class MainWindow(QMainWindow):
             else:
                 return
         
-        # Use per-layer settings - don't override layer settings
-        # Each layer already has its own settings configured in the layers panel
-        # Only apply global settings if a layer doesn't have use_layer_settings enabled
+        # Use per-layer settings - each layer has its own settings configured in the layers panel
+        # If a layer doesn't have settings enabled, use default LaserSettings
+        from ..core.shapes import LaserSettings
         for layer in self.document.layers:
             if not layer.use_layer_settings:
-                # Fallback to global settings if layer settings not enabled
-                laser_settings = self.laser_panel.get_laser_settings()
-                layer.laser_settings = laser_settings
+                # Use default settings if layer settings not enabled
+                layer.laser_settings = LaserSettings()
                 layer.use_layer_settings = True
         
         # Create job with work area validation

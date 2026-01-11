@@ -7,7 +7,7 @@ Contains the graphics/rendering components:
 - Selection: Selection handling
 """
 
-from .items import ShapeGraphicsItem, SelectionHandleItem
+from .items import ShapeGraphicsItem, SelectionHandleItem, ImageGraphicsItem
 from .text_item import EditableTextItem
 from .tools import (
     DrawingTool, LineTool, RectangleTool, EllipseTool,
@@ -20,6 +20,7 @@ __all__ = [
     # Items
     'ShapeGraphicsItem',
     'SelectionHandleItem',
+    'ImageGraphicsItem',
     'EditableTextItem',
     # Tools
     'DrawingTool',

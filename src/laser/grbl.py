@@ -124,6 +124,11 @@ class GRBLController(LaserController):
             self._send_realtime(self.CMD_STATUS)
             time.sleep(0.1)
             
+            # CRITICAL SAFETY: Ensure laser is OFF immediately after connection
+            # Some GRBL controllers may have laser enabled from previous session
+            self.send_command("M5", wait_for_ok=False)  # Laser off - don't wait to avoid blocking
+            time.sleep(0.1)  # Brief delay to allow command to be processed
+            
             self.status.state = ConnectionState.CONNECTED
             self._notify_status()
             
@@ -209,6 +214,12 @@ class GRBLController(LaserController):
         if self._serial:
             try:
                 if self._serial.is_open:
+                    # CRITICAL SAFETY: Turn off laser before disconnecting
+                    try:
+                        self.send_command("M5", wait_for_ok=False)  # Laser off
+                        time.sleep(0.1)
+                    except:
+                        pass
                     # Send soft reset before closing
                     try:
                         self._serial.write(self.CMD_SOFT_RESET)

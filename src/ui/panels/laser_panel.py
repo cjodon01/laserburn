@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox,
     QProgressBar, QListWidget, QListWidgetItem, QMessageBox,
-    QTabWidget, QGridLayout
+    QTabWidget, QGridLayout, QScrollArea
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QKeySequence
@@ -79,7 +79,13 @@ class LaserPanel(QWidget):
     
     def _create_control_tab(self):
         """Create the control tab."""
-        widget = QWidget()
+        # Create scroll area for the control tab
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Create the content widget
+        content_widget = QWidget()
         layout = QVBoxLayout()
         layout.setSpacing(10)
         
@@ -263,34 +269,6 @@ class LaserPanel(QWidget):
         queue_group.setLayout(queue_layout)
         layout.addWidget(queue_group)
         
-        # Laser settings group
-        settings_group = QGroupBox("Laser Settings")
-        settings_layout = QFormLayout()
-        
-        self.power_spin = QDoubleSpinBox()
-        self.power_spin.setRange(0, 100)
-        self.power_spin.setValue(50)
-        self.power_spin.setSuffix(" %")
-        settings_layout.addRow("Power:", self.power_spin)
-        
-        self.speed_spin = QDoubleSpinBox()
-        self.speed_spin.setRange(0.1, 1000)
-        self.speed_spin.setValue(100)
-        self.speed_spin.setSuffix(" mm/s")
-        settings_layout.addRow("Speed:", self.speed_spin)
-        
-        self.passes_spin = QSpinBox()
-        self.passes_spin.setRange(1, 10)
-        self.passes_spin.setValue(1)
-        settings_layout.addRow("Passes:", self.passes_spin)
-        
-        self.air_assist_check = QCheckBox()
-        self.air_assist_check.setChecked(True)
-        settings_layout.addRow("Air Assist:", self.air_assist_check)
-        
-        settings_group.setLayout(settings_layout)
-        layout.addWidget(settings_group)
-        
         # Machine work area group
         workarea_group = QGroupBox("Machine Work Area")
         workarea_layout = QFormLayout()
@@ -362,9 +340,9 @@ class LaserPanel(QWidget):
         spindle_group.setLayout(spindle_layout)
         layout.addWidget(spindle_group)
         
-        layout.addStretch()
-        widget.setLayout(layout)
-        return widget
+        content_widget.setLayout(layout)
+        scroll.setWidget(content_widget)
+        return scroll
     
     def _create_console_tab(self):
         """Create the console tab."""
@@ -576,19 +554,16 @@ class LaserPanel(QWidget):
         self._update_connection_status()
     
     def get_laser_settings(self):
-        """Get current laser settings."""
+        """Get default laser settings (settings are now managed per-layer)."""
         from ...core.shapes import LaserSettings
         
-        return LaserSettings(
-            power=self.power_spin.value(),
-            speed=self.speed_spin.value(),
-            passes=self.passes_spin.value(),
-            air_assist=self.air_assist_check.isChecked()
-        )
+        # Return default settings - actual settings are managed in layers panel
+        return LaserSettings()
     
     def _update_spindle_info(self, value):
         """Update the spindle info label when value changes."""
-        power_percent = self.power_spin.value() if hasattr(self, 'power_spin') else 50
+        # Use default 50% power for example calculation
+        power_percent = 50
         s_value = int(round((power_percent / 100.0) * value))
         if hasattr(self, '_spindle_info_label'):
             self._spindle_info_label.setText(f"{power_percent:.0f}% power at $30={value} sends S{s_value}")
@@ -652,14 +627,7 @@ class LaserPanel(QWidget):
             )
     
     def apply_material(self, material):
-        """Apply material settings."""
-        if material:
-            # Apply material settings to spin boxes
-            if hasattr(material, 'cut_power'):
-                self.power_spin.setValue(material.cut_power)
-            if hasattr(material, 'cut_speed'):
-                self.speed_spin.setValue(material.cut_speed)
-            if hasattr(material, 'cut_passes'):
-                self.passes_spin.setValue(material.cut_passes)
-            if hasattr(material, 'cut_air_assist'):
-                self.air_assist_check.setChecked(material.cut_air_assist)
+        """Apply material settings (no-op - settings are now managed per-layer)."""
+        # Material settings are now applied directly to layers via the layers panel
+        # This method is kept for compatibility but does nothing
+        pass

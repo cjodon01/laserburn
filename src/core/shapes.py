@@ -692,3 +692,98 @@ class Path(Shape):
             return False
         return point_in_polygon(point, paths[0])
 
+
+class ImageShape(Shape):
+    """
+    An image shape for raster engraving.
+    
+    Stores the image data directly - no conversion to vectors.
+    G-code generation handles converting to scanlines.
+    """
+    
+    def __init__(self, x: float, y: float, width: float, height: float,
+                 image_data=None, filepath: str = ""):
+        """
+        Initialize an image shape.
+        
+        Args:
+            x: X position (mm)
+            y: Y position (mm)
+            width: Display width (mm)
+            height: Display height (mm)
+            image_data: Grayscale numpy array (0-255, uint8) or None
+            filepath: Original file path for reference
+        """
+        super().__init__()
+        self.position = Point(x, y)
+        self.width = width
+        self.height = height
+        self.image_data = image_data  # Grayscale numpy array
+        self.filepath = filepath
+        
+        # Image engraving settings
+        self.dpi = 254.0  # Engraving resolution (dots per inch)
+        self.invert = False  # Invert image (swap black/white)
+        self.threshold = 128  # For simple threshold mode
+        self.dither_mode = "floyd_steinberg"  # Dithering algorithm
+        
+        # Set default laser settings for engraving
+        self.laser_settings.operation = "image"
+        self.laser_settings.power = 50.0
+        self.laser_settings.speed = 100.0
+    
+    @property
+    def image_width_px(self) -> int:
+        """Get image width in pixels."""
+        if self.image_data is not None:
+            return self.image_data.shape[1]
+        return 0
+    
+    @property
+    def image_height_px(self) -> int:
+        """Get image height in pixels."""
+        if self.image_data is not None:
+            return self.image_data.shape[0]
+        return 0
+    
+    def get_paths(self) -> List[List[Point]]:
+        """Return bounding rectangle path for display."""
+        # Return the bounding box as a rectangle for display purposes
+        points = [
+            Point(self.position.x, self.position.y),
+            Point(self.position.x + self.width, self.position.y),
+            Point(self.position.x + self.width, self.position.y + self.height),
+            Point(self.position.x, self.position.y + self.height),
+            Point(self.position.x, self.position.y)  # Close the path
+        ]
+        return [points]
+    
+    def get_bounding_box(self) -> BoundingBox:
+        return BoundingBox(
+            min_x=self.position.x,
+            min_y=self.position.y,
+            max_x=self.position.x + self.width,
+            max_y=self.position.y + self.height
+        )
+    
+    def clone(self) -> 'ImageShape':
+        img = ImageShape(
+            self.position.x, self.position.y,
+            self.width, self.height,
+            self.image_data.copy() if self.image_data is not None else None,
+            self.filepath
+        )
+        img.rotation = self.rotation
+        img.scale_x = self.scale_x
+        img.scale_y = self.scale_y
+        img.dpi = self.dpi
+        img.invert = self.invert
+        img.threshold = self.threshold
+        img.dither_mode = self.dither_mode
+        img.laser_settings = LaserSettings(**self.laser_settings.__dict__)
+        return img
+    
+    def contains_point(self, point: Point) -> bool:
+        bb = self.get_bounding_box()
+        return bb.contains(point)
+

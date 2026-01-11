@@ -9,10 +9,17 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 
-from ..core.shapes import Point, Shape, LaserSettings
+from ..core.shapes import Point, Shape, LaserSettings, ImageShape
 from ..core.document import Document
 from ..core.layer import Layer
 from .path_optimizer import optimize_paths
+
+# Import dithering for image processing
+try:
+    from ..image.dithering import ImageDitherer, DitheringMethod
+    HAS_DITHERING = True
+except ImportError:
+    HAS_DITHERING = False
 
 
 class LaserMode(Enum):
@@ -131,6 +138,10 @@ class GCodeGenerator:
                 except Exception as e:
                     warnings.append(f"Could not get bounding box for shape: {e}")
         
+        # Store document dimensions for coordinate transformation
+        self._current_document_height = document.height
+        self._current_document_width = document.width
+        
         # Header
         self._add_header(document)
         
@@ -220,6 +231,11 @@ class GCodeGenerator:
                 else:
                     settings = shape.laser_settings
                 
+                # Handle ImageShape specially - generate scanlines
+                if isinstance(shape, ImageShape):
+                    self._process_image_shape(shape, settings)
+                    continue
+                
                 paths = shape.get_paths()
                 # Filter out empty paths
                 valid_paths = [p for p in paths if p and len(p) > 0]
@@ -289,6 +305,209 @@ class GCodeGenerator:
                 self._cut_path(fill_line, settings)
         
         self._emit("")
+    
+    def _process_image_shape(self, image_shape: ImageShape, settings: LaserSettings):
+        """
+        Process an ImageShape by generating scanlines for engraving.
+        
+        This converts the image to scanlines at the specified DPI,
+        applying dithering to convert grayscale to on/off laser pulses.
+        """
+        if image_shape.image_data is None:
+            return
+        
+        self._emit(f"; Image: {image_shape.filepath}")
+        
+        import numpy as np
+        
+        # Get image data and dimensions
+        img = image_shape.image_data.copy()
+        img_height, img_width = img.shape
+        
+        # Get output dimensions in mm
+        out_width_mm = image_shape.width
+        out_height_mm = image_shape.height
+        
+        # Calculate DPI and line spacing
+        dpi = image_shape.dpi
+        mm_per_inch = 25.4
+        line_spacing_mm = mm_per_inch / dpi  # Distance between scan lines
+        
+        # Calculate number of scanlines
+        num_lines = int(out_height_mm / line_spacing_mm)
+        
+        # Calculate power value
+        power = int((settings.power / 100.0) * self.settings.max_power)
+        speed = settings.speed * 60  # Convert mm/s to mm/min
+        
+        # Apply dithering to convert grayscale to binary
+        if HAS_DITHERING:
+            dither_mode = getattr(image_shape, 'dither_mode', 'floyd_steinberg')
+            if dither_mode == 'floyd_steinberg':
+                method = DitheringMethod.FLOYD_STEINBERG
+            elif dither_mode == 'jarvis':
+                method = DitheringMethod.JARVIS_JUDICE_NINKE
+            elif dither_mode == 'atkinson':
+                method = DitheringMethod.ATKINSON
+            elif dither_mode == 'bayer':
+                method = DitheringMethod.BAYER_4x4
+            else:
+                method = DitheringMethod.FLOYD_STEINBERG
+            
+            ditherer = ImageDitherer(method)
+            binary_img = ditherer.dither(img, image_shape.threshold)
+        else:
+            # Simple threshold if dithering not available
+            binary_img = np.where(img >= image_shape.threshold, 255, 0).astype(np.uint8)
+        
+        # Transform image position from canvas coordinates to laser coordinates
+        # Get document dimensions (should be set by generate() method)
+        document_height = getattr(self, '_current_document_height', 400.0)  # Default fallback
+        document_width = getattr(self, '_current_document_width', 400.0)  # Default fallback
+        
+        # Get the image's bounding box to find the bottom-left corner
+        # This matches what the frame operation uses
+        bbox = image_shape.get_bounding_box()
+        canvas_bottom_left = Point(bbox.min_x, bbox.max_y)  # Bottom-left in canvas coordinates
+        laser_bottom_left = self._canvas_to_laser(canvas_bottom_left, document_height, document_width)
+        
+        # Start position for scanlines (bottom-left in laser coordinates)
+        start_x = laser_bottom_left.x
+        start_y = laser_bottom_left.y
+        
+        # Use M4 (dynamic power mode) for image engraving (like LightBurn)
+        self._emit("M4 ; Dynamic power mode for image engraving")
+        self._emit(f"G1 F{speed:.0f} ; Set feed rate")
+        
+        # Move to start position in absolute mode
+        self._emit(f"G0 X{start_x:.3f} Y{start_y:.3f} ; Move to image start")
+        
+        # Switch to relative mode for entire image (like LightBurn)
+        self._emit("G91 ; Relative mode for image scanlines")
+        
+        # Generate scanlines (bidirectional for efficiency)
+        # Scanlines go from bottom to top in laser coordinates
+        for line_idx in range(num_lines):
+            # Y position for this scanline (in laser coordinates)
+            # Start from bottom and work upward
+            y_mm = start_y + (line_idx * line_spacing_mm)
+            
+            # Calculate which row of image pixels to sample
+            # Since we're engraving from bottom to top in laser space, but image rows
+            # are stored top to bottom, we need to reverse the row index
+            img_row = int(((num_lines - 1 - line_idx) / num_lines) * img_height)
+            if img_row >= img_height:
+                img_row = img_height - 1
+            if img_row < 0:
+                img_row = 0
+            
+            # Get pixel row
+            row_data = binary_img[img_row]
+            
+            # Calculate pixel-to-mm conversion
+            px_to_mm = out_width_mm / img_width
+            
+            # Determine scan direction (bidirectional)
+            reverse = (line_idx % 2 == 1)
+            
+            # Build runs of consecutive pixels with same state
+            # A run is (start_px, end_px, is_on) where is_on means engrave
+            runs = []
+            in_run = False
+            run_start = 0
+            current_state = False
+            
+            # Iterate through pixels in scan direction
+            pixel_range = range(img_width - 1, -1, -1) if reverse else range(img_width)
+            
+            for px in pixel_range:
+                pixel_on = row_data[px] == 0  # 0 = black = engrave
+                
+                if pixel_on != current_state:
+                    # State changed
+                    if in_run:
+                        # Close previous run
+                        runs.append((run_start, px, current_state))
+                    # Start new run
+                    run_start = px
+                    current_state = pixel_on
+                    in_run = True
+                elif not in_run:
+                    # Start first run
+                    run_start = px
+                    current_state = pixel_on
+                    in_run = True
+            
+            # Close final run
+            if in_run:
+                final_px = 0 if reverse else img_width
+                runs.append((run_start, final_px, current_state))
+            
+            # Skip empty lines
+            if not runs:
+                # Still need to move Y for next scanline
+                if line_idx < num_lines - 1:
+                    self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
+                continue
+            
+            # Calculate X position for start of this scanline
+            if line_idx == 0:
+                # First scanline: position at start (X=0 in relative coordinates)
+                # We're already at the start position, so no X move needed for forward
+                # For reverse, we need to move to the right end
+                if reverse:
+                    x_move = img_width * px_to_mm
+                    self._emit(f"G1 X{x_move:.3f} ; Move to reverse scanline start")
+            else:
+                # Subsequent scanlines: need to move X to start and Y up
+                prev_reverse = ((line_idx - 1) % 2 == 1)
+                
+                if reverse:
+                    # This line is reverse: need to be at right end (X = width)
+                    if prev_reverse:
+                        # Last line was also reverse: ended at left (X=0), move to right
+                        x_move = img_width * px_to_mm
+                    else:
+                        # Last line was forward: ended at right (X=width), already there
+                        x_move = 0
+                else:
+                    # This line is forward: need to be at left end (X=0)
+                    if prev_reverse:
+                        # Last line was reverse: ended at left (X=0), already there
+                        x_move = 0
+                    else:
+                        # Last line was forward: ended at right (X=width), move back to left
+                        x_move = -(img_width * px_to_mm)
+                
+                # Move Y up and X to start position
+                if abs(x_move) > 0.001:
+                    self._emit(f"G1 X{x_move:.3f} Y{line_spacing_mm:.3f} ; Move to next scanline")
+                else:
+                    self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
+            
+            # Generate scanline segments (all in relative mode)
+            # Each run is emitted as a relative move with S parameter
+            for run_start_px, run_end_px, is_on in runs:
+                if reverse:
+                    # Going left: move is negative (from higher pixel to lower)
+                    move_mm = (run_end_px - run_start_px) * px_to_mm
+                else:
+                    # Going right: move is positive
+                    move_mm = (run_end_px - run_start_px) * px_to_mm
+                
+                # Only emit non-zero moves
+                if abs(move_mm) > 0.001:  # Small threshold to avoid rounding errors
+                    s_value = power if is_on else 0
+                    self._emit(f"G1 X{move_mm:.3f} S{s_value}")
+        
+        # Switch back to absolute mode
+        self._emit("G90 ; Back to absolute mode")
+        
+        # Turn off laser and restore M3 mode
+        self._emit("M5 ; Laser off")
+        self._emit("M3 ; Restore constant power mode")
+        
+        self._emit(f"; End of image")
     
     def _canvas_to_laser(self, canvas_point: Point, document_height: float, document_width: float) -> Point:
         """

@@ -65,6 +65,22 @@ class ImageImporter:
         # Load image
         img = Image.open(filepath)
         
+        # Handle transparency by compositing onto white background
+        # This ensures transparent areas = white = no engraving (like LightBurn)
+        if img.mode in ('RGBA', 'LA', 'PA'):
+            # Create white background
+            background = Image.new('RGBA', img.size, (255, 255, 255, 255))
+            # Composite image onto white background
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            img = Image.alpha_composite(background, img)
+        elif img.mode == 'P':
+            # Palette mode - check for transparency
+            if 'transparency' in img.info:
+                img = img.convert('RGBA')
+                background = Image.new('RGBA', img.size, (255, 255, 255, 255))
+                img = Image.alpha_composite(background, img)
+        
         # Convert to grayscale
         if img.mode != 'L':
             img = img.convert('L')

@@ -412,13 +412,23 @@ class GCodeGenerator:
             
             # Build runs of consecutive pixels with same state
             # A run is (start_px, end_px, is_on) where is_on means engrave
+            # 
+            # IMPORTANT: Forward and reverse scans must cover exactly the same distance
+            # to prevent cumulative drift (which causes diagonal/rhombus distortion).
+            # Forward: starts at 0, ends at img_width
+            # Reverse: starts at img_width, ends at 0
             runs = []
             in_run = False
-            run_start = 0
             current_state = False
             
-            # Iterate through pixels in scan direction
-            pixel_range = range(img_width - 1, -1, -1) if reverse else range(img_width)
+            # Set initial run_start position based on direction
+            # This ensures forward and reverse scans cover identical distances
+            if reverse:
+                run_start = img_width  # Start at right edge for reverse
+                pixel_range = range(img_width - 1, -1, -1)  # Process pixels right to left
+            else:
+                run_start = 0  # Start at left edge for forward
+                pixel_range = range(img_width)  # Process pixels left to right
             
             for px in pixel_range:
                 pixel_on = row_data[px] == 0  # 0 = black = engrave
@@ -426,19 +436,19 @@ class GCodeGenerator:
                 if pixel_on != current_state:
                     # State changed
                     if in_run:
-                        # Close previous run
+                        # Close previous run at current pixel position
                         runs.append((run_start, px, current_state))
-                    # Start new run
+                    # Start new run from current pixel
                     run_start = px
                     current_state = pixel_on
                     in_run = True
                 elif not in_run:
-                    # Start first run
-                    run_start = px
+                    # Start first run - but keep run_start at the edge (0 or img_width)
+                    # so the initial segment covers from edge to first pixel
                     current_state = pixel_on
                     in_run = True
             
-            # Close final run
+            # Close final run at the opposite edge
             if in_run:
                 final_px = 0 if reverse else img_width
                 runs.append((run_start, final_px, current_state))

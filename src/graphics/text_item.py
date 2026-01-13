@@ -45,6 +45,7 @@ class EditableTextItem(QGraphicsTextItem):
         self._original_text = text
         self._text_shape: Optional[Text] = None  # Reference to Text shape if created
         self._is_dragging = False  # Track if item is being dragged
+        self._is_transforming = False  # Track if item is being transformed (scaled/rotated)
         
         # Set font
         font = QFont(font_family, int(font_size))
@@ -208,6 +209,38 @@ class EditableTextItem(QGraphicsTextItem):
         font.setBold(shape.bold)
         font.setItalic(shape.italic)
         self.setFont(font)
+        
+        # Apply scale and rotation transforms
+        self._apply_shape_transforms()
+    
+    def _apply_shape_transforms(self):
+        """Apply scale and rotation from the shape to the graphics item."""
+        if not self._text_shape:
+            return
+        
+        # Create transform for scale and rotation
+        from PyQt6.QtGui import QTransform
+        import math
+        
+        # Get the item's bounding rect (untransformed) for center calculation
+        # Reset transform temporarily to get original bounds
+        old_transform = self.transform()
+        self.setTransform(QTransform())
+        bounds = self.boundingRect()
+        center_x = bounds.center().x()
+        center_y = bounds.center().y()
+        # Restore old transform
+        self.setTransform(old_transform)
+        
+        # Create transform: translate to center, rotate, scale, translate back
+        transform = QTransform()
+        transform.translate(center_x, center_y)
+        transform.rotate(math.degrees(self._text_shape.rotation))
+        transform.scale(self._text_shape.scale_x, self._text_shape.scale_y)
+        transform.translate(-center_x, -center_y)
+        
+        # Apply transform
+        self.setTransform(transform)
     
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
         """Handle item changes (position, selection, etc.)."""
@@ -217,17 +250,20 @@ class EditableTextItem(QGraphicsTextItem):
                 self._is_dragging = True
         elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # Update shape position when item is moved
-            if self._text_shape:
+            # Only update position if we're not transforming (scaling/rotating)
+            # Transform operations update the shape directly
+            if self._text_shape and not self._is_transforming:
                 new_pos = self.pos()
                 self._text_shape.position = Point(new_pos.x(), new_pos.y())
                 # Invalidate cache so paths are recalculated
                 self._text_shape.invalidate_cache()
-                # Don't trigger view update during drag - only update shape position
-                # The view will sync when drag finishes
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # When selection changes (drag ends), reset dragging flag
             if not value:  # Item was deselected
                 self._is_dragging = False
+                # Reapply transforms when deselected
+                if self._text_shape:
+                    self._apply_shape_transforms()
         
         return super().itemChange(change, value)
     

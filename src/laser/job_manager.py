@@ -184,41 +184,68 @@ class JobManager:
     
     def cancel_current_job(self) -> bool:
         """Cancel the currently running job."""
-        if not self._current_job:
-            return False
-        
-        if self.controller.stop_job():
-            self._current_job.status = JobState.CANCELLED
-            self._current_job.completed_at = datetime.now()
-            self._notify_job_callbacks(self._current_job)
+        # Use lock to prevent race conditions
+        with self._queue_lock:
+            if not self._current_job:
+                return False
+            
+            # Store reference to avoid race condition
+            job = self._current_job
+            
+            # Try to stop on controller (may fail if disconnected)
+            try:
+                if self.controller and hasattr(self.controller, 'stop_job'):
+                    self.controller.stop_job()
+            except Exception as e:
+                print(f"Error stopping job on controller: {e}")
+                # Continue anyway - we'll cancel the job locally
+            
+            # Update job state
+            job.status = JobState.CANCELLED
+            job.completed_at = datetime.now()
+            self._notify_job_callbacks(job)
             self._current_job = None
             return True
-        
-        return False
     
     def pause_current_job(self) -> bool:
         """Pause the currently running job."""
-        if not self._current_job:
+        with self._queue_lock:
+            if not self._current_job:
+                return False
+            
+            job = self._current_job
+            
+            # Try to pause on controller
+            try:
+                if self.controller and hasattr(self.controller, 'pause_job'):
+                    if self.controller.pause_job():
+                        job.status = JobState.PAUSED
+                        self._notify_job_callbacks(job)
+                        return True
+            except Exception as e:
+                print(f"Error pausing job on controller: {e}")
+            
             return False
-        
-        if self.controller.pause_job():
-            self._current_job.status = JobState.PAUSED
-            self._notify_job_callbacks(self._current_job)
-            return True
-        
-        return False
     
     def resume_current_job(self) -> bool:
         """Resume the currently paused job."""
-        if not self._current_job:
+        with self._queue_lock:
+            if not self._current_job:
+                return False
+            
+            job = self._current_job
+            
+            # Try to resume on controller
+            try:
+                if self.controller and hasattr(self.controller, 'resume_job'):
+                    if self.controller.resume_job():
+                        job.status = JobState.RUNNING
+                        self._notify_job_callbacks(job)
+                        return True
+            except Exception as e:
+                print(f"Error resuming job on controller: {e}")
+            
             return False
-        
-        if self.controller.resume_job():
-            self._current_job.status = JobState.RUNNING
-            self._notify_job_callbacks(self._current_job)
-            return True
-        
-        return False
     
     def get_queue(self) -> List[LaserJob]:
         """Get list of queued jobs."""
@@ -269,50 +296,102 @@ class JobManager:
     
     def _execute_job(self, job: LaserJob):
         """Execute a single job."""
-        self._current_job = job
-        job.status = JobState.RUNNING
-        job.started_at = datetime.now()
-        self._notify_job_callbacks(job)
+        with self._queue_lock:
+            self._current_job = job
+            job.status = JobState.RUNNING
+            job.started_at = datetime.now()
+            job.progress = 0.0
+            self._notify_job_callbacks(job)
         
         # Start job on controller
-        if not self.controller.start_job(job.gcode):
+        try:
+            if not self.controller or not hasattr(self.controller, 'start_job'):
+                job.status = JobState.ERROR
+                job.error_message = "Controller not available"
+                job.completed_at = datetime.now()
+                self._notify_job_callbacks(job)
+                with self._queue_lock:
+                    self._current_job = None
+                return
+            
+            if not self.controller.start_job(job.gcode):
+                job.status = JobState.ERROR
+                job.error_message = "Failed to start job on controller"
+                job.completed_at = datetime.now()
+                self._notify_job_callbacks(job)
+                with self._queue_lock:
+                    self._current_job = None
+                return
+        except Exception as e:
             job.status = JobState.ERROR
-            job.error_message = "Failed to start job on controller"
+            job.error_message = f"Error starting job: {str(e)}"
             job.completed_at = datetime.now()
             self._notify_job_callbacks(job)
-            self._current_job = None
+            with self._queue_lock:
+                self._current_job = None
             return
         
-        # Wait for completion
+        # Wait for completion - check status updates from controller
         start_time = time.time()
-        while job.status == JobState.RUNNING:
+        last_progress_update = time.time()
+        
+        while job.status in (JobState.RUNNING, JobState.PAUSED):
             time.sleep(0.1)
             job.elapsed_time = time.time() - start_time
+            
+            # Periodically notify callbacks even if progress hasn't changed
+            # This ensures UI updates (elapsed time, etc.)
+            if time.time() - last_progress_update > 0.5:  # Update every 0.5 seconds
+                self._notify_job_callbacks(job)
+                last_progress_update = time.time()
+            
+            # Check if controller disconnected
+            if self.controller and hasattr(self.controller, 'status'):
+                if self.controller.status.state.value == "disconnected":
+                    job.status = JobState.ERROR
+                    job.error_message = "Controller disconnected during job"
+                    break
         
         # Job completed
         job.completed_at = datetime.now()
         self._notify_job_callbacks(job)
-        self._current_job = None
+        with self._queue_lock:
+            self._current_job = None
     
     def _on_controller_status(self, status: ControllerStatus):
         """Handle controller status updates."""
-        if self._current_job:
-            # Update job status from controller
-            if status.job_state != self._current_job.status:
-                self._current_job.status = status.job_state
-                self._notify_job_callbacks(self._current_job)
+        # Use lock to prevent race conditions
+        with self._queue_lock:
+            if not self._current_job:
+                return
             
-            # Update progress
-            if status.progress != self._current_job.progress:
-                self._current_job.progress = status.progress
-                self._notify_job_callbacks(self._current_job)
+            job = self._current_job
+            
+            # Update job status from controller
+            if status.job_state != job.status:
+                job.status = status.job_state
+                self._notify_job_callbacks(job)
+            
+            # Update progress - always update if different
+            if hasattr(status, 'progress') and status.progress is not None:
+                if abs(status.progress - job.progress) > 0.1:  # Update if changed by >0.1%
+                    job.progress = status.progress
+                    self._notify_job_callbacks(job)
             
             # Update error message
             if status.error_message:
-                self._current_job.error_message = status.error_message
+                job.error_message = status.error_message
                 if status.state.value == "error" or status.state.value == "alarm":
-                    self._current_job.status = JobState.ERROR
-                    self._notify_job_callbacks(self._current_job)
+                    job.status = JobState.ERROR
+                    self._notify_job_callbacks(job)
+            
+            # Handle disconnection during job
+            if status.state.value == "disconnected" and job.status in (JobState.RUNNING, JobState.PAUSED):
+                job.status = JobState.ERROR
+                job.error_message = "Controller disconnected during job"
+                job.completed_at = datetime.now()
+                self._notify_job_callbacks(job)
+                self._current_job = None
     
     def _notify_job_callbacks(self, job: LaserJob):
         """Notify all callbacks of job status change using Qt signals."""

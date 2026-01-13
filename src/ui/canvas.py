@@ -183,25 +183,23 @@ class LaserCanvas(QGraphicsView):
             painter.setFont(font)
             painter.setPen(QPen(QColor(100, 100, 100), 1))
             
-            # Draw X axis labels (along bottom, origin at bottom-left like laser)
+            # Draw X axis labels (along bottom, aligned with major grid lines)
             major_spacing = self._grid_spacing * 5  # Major grid spacing
             x = 0
             while x <= self.document.width:
-                if x >= 0:
-                    # Draw at bottom edge (outside workspace)
-                    label_rect = QRectF(x - 15, self.document.height + 2, 30, 12)
-                    painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, f"{int(x)}")
+                # Align with grid lines - draw label at exact grid position
+                label_rect = QRectF(x - 15, self.document.height + 2, 30, 12)
+                painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, f"{int(x)}")
                 x += major_spacing
             
-            # Draw Y axis labels (along left, Y increases upward to match laser)
+            # Draw Y axis labels (along left, aligned with major grid lines)
             y = 0
             while y <= self.document.height:
-                if y >= 0:
-                    # Draw at left edge (outside workspace)
-                    # Y coordinate on canvas = document.height - laser_y to flip Y axis
-                    laser_y = self.document.height - y  # Flip for display
-                    label_rect = QRectF(-25, y - 6, 23, 12)
-                    painter.drawText(label_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{int(laser_y)}")
+                # Align with grid lines - draw label at exact grid position
+                # Y coordinate on canvas = document.height - laser_y to flip Y axis
+                laser_y = self.document.height - y  # Flip for display
+                label_rect = QRectF(-25, y - 6, 23, 12)
+                painter.drawText(label_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{int(laser_y)}")
                 y += major_spacing
             
             # Draw axis labels
@@ -294,6 +292,8 @@ class LaserCanvas(QGraphicsView):
                         continue
                 elif isinstance(item, ShapeGraphicsItem):
                     shape = item.shape_ref
+                elif isinstance(item, ImageGraphicsItem):
+                    shape = item.shape_ref
                 else:
                     shape = item.data(0)
                 
@@ -352,15 +352,12 @@ class LaserCanvas(QGraphicsView):
                                     # Don't update if item is being dragged
                                     if hasattr(item, '_is_dragging') and item._is_dragging:
                                         continue
-                                    # Don't update position if item was just moved (position might be different)
-                                    # Only update if the shape position is significantly different
-                                    shape_pos = QPointF(shape.position.x, shape.position.y)
-                                    item_pos = item.pos()
-                                    if abs(shape_pos.x() - item_pos.x()) > 0.1 or abs(shape_pos.y() - item_pos.y()) > 0.1:
-                                        # Position differs - don't update (user might be dragging)
-                                        continue
-                                    # Safe to update
+                                    # Always update text shape to sync font properties
+                                    # Position updates are handled separately in itemChange
                                     item.set_text_shape(shape)
+                                elif isinstance(item, ImageGraphicsItem):
+                                    # Update image item from shape
+                                    item.update_from_shape()
                                 # For other items, path updates are handled by ShapeGraphicsItem
                                 continue
                             
@@ -1059,6 +1056,33 @@ class LaserCanvas(QGraphicsView):
         """Rotate selected shapes by angle (in radians)."""
         self._selection_manager.rotate(angle)
         self._update_view()
+    
+    def get_selected_shapes(self) -> List[Shape]:
+        """Get all currently selected shapes."""
+        from ..graphics.text_item import EditableTextItem
+        
+        selected_shapes = []
+        for item in self.scene.selectedItems():
+            if isinstance(item, EditableTextItem):
+                shape = item.data(0)
+                if shape:
+                    selected_shapes.append(shape)
+            elif isinstance(item, ShapeGraphicsItem):
+                shape = item.shape_ref
+                if shape:
+                    selected_shapes.append(shape)
+            else:
+                shape = item.data(0)
+                if shape:
+                    selected_shapes.append(shape)
+        
+        # Also include shapes from SelectionManager
+        manager_shapes = self._selection_manager.get_selected_shapes()
+        for s in manager_shapes:
+            if s not in selected_shapes:
+                selected_shapes.append(s)
+        
+        return selected_shapes
     
     def _on_text_editing_finished(self, text: str, position: QPointF):
         """Handle text editing finished - convert to Text shape."""

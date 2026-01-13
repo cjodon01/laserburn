@@ -4,10 +4,10 @@ Main Application Window for LaserBurn
 
 from PyQt6.QtWidgets import (
     QMainWindow, QToolBar, QDockWidget, QStatusBar,
-    QMenuBar, QMenu, QFileDialog, QMessageBox, QDialog
+    QMenuBar, QMenu, QFileDialog, QMessageBox, QDialog, QStyle
 )
 from PyQt6.QtCore import Qt, QSettings, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence, QActionGroup
+from PyQt6.QtGui import QAction, QKeySequence, QActionGroup, QIcon
 
 from ..core.document import Document
 from ..core.layer import Layer
@@ -22,7 +22,10 @@ from .dialogs.connection_dialog import ConnectionDialog
 from ..laser.grbl import GRBLController
 from ..laser.job_manager import JobManager, JobPriority
 from ..laser.gcode_generator import GCodeGenerator, GCodeSettings
-from ..laser.controller import ConnectionState
+from ..laser.controller import ConnectionState, JobState
+from ..io.project_io import save_project, load_project
+from datetime import datetime
+from typing import Optional
 import traceback
 import time
 
@@ -77,9 +80,14 @@ class MainWindow(QMainWindow):
         
         self.document = Document(name="Untitled")
         self.document.add_layer(Layer(name="Layer 1"))
+        from datetime import datetime
+        self.document.created_at = datetime.now().isoformat()
         
-        self.setWindowTitle("LaserBurn - Laser Engraving Software")
+        self.setWindowTitle("LaserBurn - Untitled")
         self.setMinimumSize(1200, 800)
+        
+        # Track current file path for save
+        self._current_filepath: Optional[str] = None
         
         # Initialize laser components
         self._controller = None
@@ -221,53 +229,77 @@ class MainWindow(QMainWindow):
         self.action_cylinder_engraving.setStatusTip("Configure cylinder engraving settings")
         self.action_cylinder_engraving.triggered.connect(self._on_cylinder_engraving)
         
-        # Tool actions
-        self.action_tool_select = QAction("&Select", self)
+        # Image settings action
+        self.action_image_settings = QAction("&Image Settings...", self)
+        self.action_image_settings.setShortcut("Ctrl+Shift+I")
+        self.action_image_settings.setStatusTip("Configure image processing settings (dithering, DPI, brightness)")
+        self.action_image_settings.triggered.connect(self._on_image_settings)
+        self.action_image_settings.setEnabled(False)  # Enabled when image is selected
+        
+        # Tool actions with icons and tooltips
+        # Using Unicode symbols for intuitive tool representation
+        # These render well on modern systems and are immediately recognizable
+        
+        # Select tool
+        self.action_tool_select = QAction("⇱", self)
         self.action_tool_select.setShortcut("V")
         self.action_tool_select.setCheckable(True)
         self.action_tool_select.setChecked(True)
+        self.action_tool_select.setToolTip("Select Tool (V)\nSelect and move objects")
         self.action_tool_select.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.SELECT)
         )
         
-        self.action_tool_line = QAction("&Line", self)
+        # Line tool
+        self.action_tool_line = QAction("╱", self)
         self.action_tool_line.setShortcut("L")
         self.action_tool_line.setCheckable(True)
+        self.action_tool_line.setToolTip("Line Tool (L)\nDraw straight lines")
         self.action_tool_line.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.LINE)
         )
         
-        self.action_tool_rect = QAction("&Rectangle", self)
+        # Rectangle tool
+        self.action_tool_rect = QAction("▭", self)
         self.action_tool_rect.setShortcut("R")
         self.action_tool_rect.setCheckable(True)
+        self.action_tool_rect.setToolTip("Rectangle Tool (R)\nDraw rectangles and squares")
         self.action_tool_rect.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.RECTANGLE)
         )
         
-        self.action_tool_ellipse = QAction("&Ellipse", self)
+        # Ellipse tool
+        self.action_tool_ellipse = QAction("○", self)
         self.action_tool_ellipse.setShortcut("E")
         self.action_tool_ellipse.setCheckable(True)
+        self.action_tool_ellipse.setToolTip("Ellipse Tool (E)\nDraw ellipses and circles")
         self.action_tool_ellipse.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.ELLIPSE)
         )
         
-        self.action_tool_polygon = QAction("&Polygon", self)
+        # Polygon tool
+        self.action_tool_polygon = QAction("⬟", self)
         self.action_tool_polygon.setShortcut("P")
         self.action_tool_polygon.setCheckable(True)
+        self.action_tool_polygon.setToolTip("Polygon Tool (P)\nDraw polygons (click to add points, Enter to finish)")
         self.action_tool_polygon.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.POLYGON)
         )
         
-        self.action_tool_pen = QAction("&Pen", self)
+        # Pen tool (freehand)
+        self.action_tool_pen = QAction("✎", self)
         self.action_tool_pen.setShortcut("N")
         self.action_tool_pen.setCheckable(True)
+        self.action_tool_pen.setToolTip("Pen Tool (N)\nFreehand drawing tool")
         self.action_tool_pen.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.PEN)
         )
         
-        self.action_tool_text = QAction("&Text", self)
+        # Text tool
+        self.action_tool_text = QAction("T", self)
         self.action_tool_text.setShortcut("T")
         self.action_tool_text.setCheckable(True)
+        self.action_tool_text.setToolTip("Text Tool (T)\nAdd text to your design")
         self.action_tool_text.triggered.connect(
             lambda: self.canvas.set_tool(ToolType.TEXT)
         )
@@ -363,6 +395,7 @@ class MainWindow(QMainWindow):
         transform_menu.addAction(self.action_rotate_180)
         
         edit_menu.addSeparator()
+        edit_menu.addAction(self.action_image_settings)
         edit_menu.addAction(self.action_cylinder_engraving)
         
         # View menu
@@ -423,10 +456,18 @@ class MainWindow(QMainWindow):
         edit_toolbar.addAction(self.action_redo)
         self.addToolBar(edit_toolbar)
         
-        # Drawing tools toolbar
-        tools_toolbar = QToolBar("Tools")
+        # Drawing tools toolbar - vertical sidebar on the left
+        tools_toolbar = QToolBar("Tools", self)
         tools_toolbar.setObjectName("ToolsToolBar")
-        tools_toolbar.setIconSize(QSize(24, 24))
+        tools_toolbar.setIconSize(QSize(40, 40))  # Larger icons for better visibility
+        tools_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)  # Show Unicode symbols as text
+        tools_toolbar.setOrientation(Qt.Orientation.Vertical)  # Vertical orientation
+        tools_toolbar.setMovable(False)  # Keep it docked on the side
+        tools_toolbar.setFloatable(False)  # Prevent floating
+        # Set larger font for Unicode symbols to render better
+        font = tools_toolbar.font()
+        font.setPointSize(20)  # Larger font for symbol visibility
+        tools_toolbar.setFont(font)
         tools_toolbar.addAction(self.action_tool_select)
         tools_toolbar.addSeparator()
         tools_toolbar.addAction(self.action_tool_line)
@@ -435,23 +476,8 @@ class MainWindow(QMainWindow):
         tools_toolbar.addAction(self.action_tool_polygon)
         tools_toolbar.addAction(self.action_tool_pen)
         tools_toolbar.addAction(self.action_tool_text)
-        self.addToolBar(tools_toolbar)
-        
-        # Laser toolbar
-        laser_toolbar = QToolBar("Laser")
-        laser_toolbar.setObjectName("LaserToolBar")
-        laser_toolbar.setIconSize(QSize(24, 24))
-        laser_toolbar.addAction(self.action_connect)
-        laser_toolbar.addAction(self.action_disconnect)
-        laser_toolbar.addSeparator()
-        laser_toolbar.addAction(self.action_home)
-        laser_toolbar.addAction(self.action_frame)
-        laser_toolbar.addSeparator()
-        laser_toolbar.addAction(self.action_start_job)
-        laser_toolbar.addAction(self.action_pause_job)
-        laser_toolbar.addAction(self.action_resume_job)
-        laser_toolbar.addAction(self.action_stop_job)
-        self.addToolBar(laser_toolbar)
+        # Dock on the left side
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, tools_toolbar)
     
     def _create_central_widget(self):
         """Create the central canvas widget."""
@@ -603,6 +629,21 @@ class MainWindow(QMainWindow):
                 self.properties_panel.update_selection
             )
             
+            # Canvas selection changes update image settings action state
+            self.canvas.selection_changed.connect(
+                self._update_image_settings_action
+            )
+            
+            # Properties panel changes update canvas view
+            self.properties_panel.property_changed.connect(
+                self.canvas._update_view
+            )
+            
+            # Properties panel image settings button opens dialog
+            self.properties_panel.open_image_settings.connect(
+                self._open_image_settings_dialog
+            )
+            
             # Layer panel updates
             self.layers_panel.layer_selected.connect(
                 self.canvas.set_active_layer
@@ -702,6 +743,8 @@ class MainWindow(QMainWindow):
         """Create new document."""
         self.document = Document(name="Untitled")
         self.document.add_layer(Layer(name="Layer 1"))
+        self.document.created_at = datetime.now().isoformat()
+        self._current_filepath = None
         self.canvas.set_document(self.document)
         self.layers_panel.set_document(self.document)
         self.setWindowTitle("LaserBurn - Untitled")
@@ -715,12 +758,46 @@ class MainWindow(QMainWindow):
             "LaserBurn Files (*.lbrn);;All Files (*)"
         )
         if filepath:
-            # TODO: Load document
             self.status_bar.showMessage(f"Opening {filepath}...")
+            document = load_project(filepath)
+            if document:
+                self.document = document
+                self._current_filepath = filepath
+                self.canvas.set_document(self.document)
+                self.layers_panel.set_document(self.document)
+                
+                # Update window title
+                from pathlib import Path
+                filename = Path(filepath).name
+                self.setWindowTitle(f"LaserBurn - {filename}")
+                
+                self.status_bar.showMessage(f"Opened {filename}", 3000)
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Open Failed",
+                    f"Failed to open file:\n{filepath}\n\nPlease check that the file is a valid LaserBurn project."
+                )
+                self.status_bar.showMessage("Failed to open file", 3000)
     
     def _on_save(self):
         """Save current document."""
-        self.status_bar.showMessage("Saving...")
+        if self._current_filepath:
+            # Save to existing file
+            if save_project(self.document, self._current_filepath):
+                from pathlib import Path
+                filename = Path(self._current_filepath).name
+                self.status_bar.showMessage(f"Saved {filename}", 3000)
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Save Failed",
+                    f"Failed to save file:\n{self._current_filepath}"
+                )
+                self.status_bar.showMessage("Failed to save file", 3000)
+        else:
+            # No file path - use Save As
+            self._on_save_as()
     
     def _on_save_as(self):
         """Save document with new name."""
@@ -731,8 +808,23 @@ class MainWindow(QMainWindow):
             "LaserBurn Files (*.lbrn);;All Files (*)"
         )
         if filepath:
-            # TODO: Save document
-            self.status_bar.showMessage(f"Saving to {filepath}...")
+            # Ensure .lbrn extension
+            if not filepath.endswith('.lbrn'):
+                filepath += '.lbrn'
+            
+            if save_project(self.document, filepath):
+                self._current_filepath = filepath
+                from pathlib import Path
+                filename = Path(filepath).name
+                self.setWindowTitle(f"LaserBurn - {filename}")
+                self.status_bar.showMessage(f"Saved {filename}", 3000)
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Save Failed",
+                    f"Failed to save file:\n{filepath}"
+                )
+                self.status_bar.showMessage("Failed to save file", 3000)
     
     def _on_import(self):
         """Import external file."""
@@ -966,6 +1058,49 @@ class MainWindow(QMainWindow):
                 f"±{params.max_angle}° max angle"
             )
     
+    def _update_image_settings_action(self, shapes):
+        """Update image settings action state based on selection."""
+        from ..core.shapes import ImageShape
+        
+        has_image = any(isinstance(s, ImageShape) for s in shapes)
+        self.action_image_settings.setEnabled(has_image)
+    
+    def _on_image_settings(self):
+        """Open image settings dialog for selected image(s)."""
+        from ..core.shapes import ImageShape
+        
+        # Get selected images from canvas
+        selected_shapes = self.canvas.get_selected_shapes()
+        image_shapes = [s for s in selected_shapes if isinstance(s, ImageShape)]
+        
+        if not image_shapes:
+            QMessageBox.information(
+                self,
+                "No Image Selected",
+                "Please select an image to edit its settings."
+            )
+            return
+        
+        # Open dialog for the first selected image
+        self._open_image_settings_dialog(image_shapes[0])
+    
+    def _open_image_settings_dialog(self, image_shape):
+        """Open the image settings dialog for a specific image shape."""
+        from .dialogs.image_settings_dialog import ImageSettingsDialog
+        
+        dialog = ImageSettingsDialog(image_shape, self)
+        
+        # Connect settings changed signal to update canvas
+        dialog.settings_changed.connect(self.canvas._update_view)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Settings were applied in dialog
+            self.canvas._update_view()
+            self.status_bar.showMessage(
+                f"Image settings updated: {image_shape.dither_mode} dithering, "
+                f"{image_shape.dpi:.0f} DPI"
+            )
+    
     def _on_zoom_in(self):
         """Zoom in."""
         self.canvas.zoom_in()
@@ -1049,8 +1184,12 @@ class MainWindow(QMainWindow):
     def _on_disconnect_laser(self):
         """Disconnect from laser controller."""
         if self._controller:
-            # Stop any running jobs
-            if self._job_manager and self._job_manager.get_current_job():
+            # Stop any running jobs - check safely
+            current_job = None
+            if self._job_manager:
+                current_job = self._job_manager.get_current_job()
+            
+            if current_job and current_job.status in (JobState.RUNNING, JobState.PAUSED):
                 reply = QMessageBox.question(
                     self,
                     "Job Running",
@@ -1058,11 +1197,28 @@ class MainWindow(QMainWindow):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
                 if reply == QMessageBox.StandardButton.Yes:
-                    self._job_manager.cancel_current_job()
+                    # Cancel job safely - method now handles None checks
+                    if self._job_manager:
+                        self._job_manager.cancel_current_job()
                 else:
                     return
             
+            # Disconnect controller
             self._controller.disconnect()
+            
+            # Clear any remaining job state if controller disconnected
+            if self._job_manager:
+                current_job = self._job_manager.get_current_job()
+                if current_job:
+                    # Job was interrupted by disconnect
+                    current_job.status = JobState.ERROR
+                    current_job.error_message = "Controller disconnected during job"
+                    current_job.completed_at = datetime.now()
+                    # Notify callbacks
+                    self._job_manager._notify_job_callbacks(current_job)
+                    # Clear current job
+                    self._job_manager._current_job = None
+            
             self.status_bar.showMessage("Disconnected from laser")
     
     def _on_home(self):

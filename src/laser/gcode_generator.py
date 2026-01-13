@@ -16,7 +16,7 @@ from .path_optimizer import optimize_paths
 
 # Import dithering for image processing
 try:
-    from ..image.dithering import ImageDitherer, DitheringMethod
+    from ..image.dithering import ImageDitherer, DitheringMethod, adjust_brightness_contrast
     HAS_DITHERING = True
 except ImportError:
     HAS_DITHERING = False
@@ -324,9 +324,9 @@ class GCodeGenerator:
         img = image_shape.image_data.copy()
         img_height, img_width = img.shape
         
-        # Get output dimensions in mm
-        out_width_mm = image_shape.width
-        out_height_mm = image_shape.height
+        # Get output dimensions in mm (accounting for scale)
+        out_width_mm = image_shape.width * abs(image_shape.scale_x)
+        out_height_mm = image_shape.height * abs(image_shape.scale_y)
         
         # Calculate DPI and line spacing
         dpi = image_shape.dpi
@@ -340,6 +340,18 @@ class GCodeGenerator:
         power = int((settings.power / 100.0) * self.settings.max_power)
         speed = settings.speed * 60  # Convert mm/s to mm/min
         
+        # Apply brightness/contrast adjustments before dithering
+        if HAS_DITHERING:
+            brightness = getattr(image_shape, 'brightness', 0.0)
+            contrast = getattr(image_shape, 'contrast', 1.0)
+            
+            if brightness != 0 or contrast != 1.0:
+                img = adjust_brightness_contrast(img, brightness, contrast)
+        
+        # Apply invert if enabled
+        if getattr(image_shape, 'invert', False):
+            img = 255 - img
+        
         # Apply dithering to convert grayscale to binary
         if HAS_DITHERING:
             dither_mode = getattr(image_shape, 'dither_mode', 'floyd_steinberg')
@@ -347,10 +359,18 @@ class GCodeGenerator:
                 method = DitheringMethod.FLOYD_STEINBERG
             elif dither_mode == 'jarvis':
                 method = DitheringMethod.JARVIS_JUDICE_NINKE
+            elif dither_mode == 'stucki':
+                method = DitheringMethod.STUCKI
             elif dither_mode == 'atkinson':
                 method = DitheringMethod.ATKINSON
-            elif dither_mode == 'bayer':
+            elif dither_mode == 'bayer' or dither_mode == 'bayer_4x4':
                 method = DitheringMethod.BAYER_4x4
+            elif dither_mode == 'bayer_2x2':
+                method = DitheringMethod.BAYER_2x2
+            elif dither_mode == 'bayer_8x8':
+                method = DitheringMethod.BAYER_8x8
+            elif dither_mode == 'none':
+                method = DitheringMethod.NONE
             else:
                 method = DitheringMethod.FLOYD_STEINBERG
             

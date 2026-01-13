@@ -52,6 +52,13 @@
   - ✅ Basic shapes (rect, circle, ellipse, line, polyline, polygon)
 - ✅ SVG Exporter
 - ✅ File import/export integration in UI
+- ✅ **Native project file format (.lbrn)** - **FULLY IMPLEMENTED**
+  - ✅ JSON-based project file format
+  - ✅ Complete document serialization (layers, shapes, settings)
+  - ✅ Image data encoding (base64)
+  - ✅ Save/load functionality in UI
+  - ✅ Support for all shape types (Rectangle, Ellipse, Path, Text, ImageShape)
+  - ✅ Cylinder engraving parameters support
 
 ### Graphics Module
 - ✅ `ShapeGraphicsItem` - Custom QGraphicsItem wrapper for shapes
@@ -127,10 +134,14 @@
 ### File I/O Module
 - ✅ SVG Parser - **COMPLETE** (all path commands, transforms, arcs, smooth curves)
 - ✅ SVG Exporter - Basic implementation
+- ✅ **Native project file format (.lbrn)** - **COMPLETE**
+  - ✅ JSON-based serialization
+  - ✅ Full document, layer, and shape support
+  - ✅ Image data encoding
+  - ✅ Save/load UI integration
 - ❌ DXF Parser - Code in guide, needs to be implemented
 - ❌ DXF Exporter
 - ❌ Image import (PNG, JPG, etc.)
-- ❌ Native project file format (.lbrn)
 
 ### Graphics Module
 - ✅ Basic drawing tools (Line, Rectangle, Ellipse, Polygon, Pen) - IMPLEMENTED & INTEGRATED

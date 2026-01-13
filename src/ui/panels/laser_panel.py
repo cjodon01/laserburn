@@ -467,6 +467,12 @@ class LaserPanel(QWidget):
     
     def _update_job_status(self):
         """Update job status display."""
+        # Get current job from job manager if available
+        if self._job_manager:
+            current_job = self._job_manager.get_current_job()
+            if current_job:
+                self._current_job = current_job
+        
         if not self._current_job:
             self.job_status_label.setText("No job running")
             self.progress_bar.setValue(0)
@@ -478,15 +484,16 @@ class LaserPanel(QWidget):
         job = self._current_job
         
         if job.status == JobState.RUNNING:
-            self.job_status_label.setText(f"Running: {job.name}")
+            self.job_status_label.setText(f"Running: {job.name} ({job.progress:.1f}%)")
             self.job_status_label.setStyleSheet("font-weight: bold; color: green;")
             self.progress_bar.setValue(int(job.progress))
             self.pause_btn.setEnabled(True)
             self.resume_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
         elif job.status == JobState.PAUSED:
-            self.job_status_label.setText(f"Paused: {job.name}")
+            self.job_status_label.setText(f"Paused: {job.name} ({job.progress:.1f}%)")
             self.job_status_label.setStyleSheet("font-weight: bold; color: orange;")
+            self.progress_bar.setValue(int(job.progress))
             self.pause_btn.setEnabled(False)
             self.resume_btn.setEnabled(True)
             self.stop_btn.setEnabled(True)
@@ -498,13 +505,23 @@ class LaserPanel(QWidget):
             self.resume_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
         elif job.status == JobState.ERROR:
-            self.job_status_label.setText(f"Error: {job.name}")
+            error_msg = job.error_message if job.error_message else "Unknown error"
+            self.job_status_label.setText(f"Error: {job.name} - {error_msg}")
             self.job_status_label.setStyleSheet("font-weight: bold; color: red;")
+            self.progress_bar.setValue(int(job.progress))
+            self.pause_btn.setEnabled(False)
+            self.resume_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+        elif job.status == JobState.CANCELLED:
+            self.job_status_label.setText(f"Cancelled: {job.name}")
+            self.job_status_label.setStyleSheet("font-weight: bold; color: gray;")
+            self.progress_bar.setValue(int(job.progress))
             self.pause_btn.setEnabled(False)
             self.resume_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
         else:
             self.job_status_label.setText(f"Queued: {job.name}")
+            self.progress_bar.setValue(0)
             self.job_status_label.setStyleSheet("font-weight: bold; color: gray;")
             self.pause_btn.setEnabled(False)
             self.resume_btn.setEnabled(False)

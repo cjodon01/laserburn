@@ -11,10 +11,10 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor
 
 from ..core.shapes import Shape, Point, BoundingBox
 from .transform import TransformManager
-from .items import ShapeGraphicsItem, SelectionHandleItem
+from .items import ShapeGraphicsItem, SelectionHandleItem, ImageGraphicsItem
 
 # Type alias for items that can be selected
-SelectableItem = Union[ShapeGraphicsItem, 'EditableTextItem']
+SelectableItem = Union[ShapeGraphicsItem, 'EditableTextItem', 'ImageGraphicsItem']
 
 
 class SelectionManager(QObject):
@@ -69,7 +69,7 @@ class SelectionManager(QObject):
     def _is_selectable_item(self, item: QGraphicsItem) -> bool:
         """Check if an item can be selected."""
         from .text_item import EditableTextItem
-        return isinstance(item, (ShapeGraphicsItem, EditableTextItem))
+        return isinstance(item, (ShapeGraphicsItem, EditableTextItem, ImageGraphicsItem))
     
     def clear_selection(self):
         """Clear all selections."""
@@ -333,11 +333,16 @@ class SelectionManager(QObject):
             pos: Current position of the handle
         """
         selected_items = list(self._selected_items)
+        print(f"[SelectionManager] _on_handle_transform: event_type={event_type}, handle_type={handle._handle_type}")
+        print(f"  pos=({pos.x():.2f}, {pos.y():.2f}), selected_items={len(selected_items)}")
+        
         if not selected_items:
+            print(f"[SelectionManager] _on_handle_transform: No selected items, returning")
             return
         
         if event_type == "start":
             # Start transform
+            print(f"[SelectionManager] _on_handle_transform: Starting transform")
             self._active_handle = handle
             self._transform_manager.start_transform(
                 selected_items,
@@ -347,18 +352,26 @@ class SelectionManager(QObject):
         elif event_type == "update":
             # Update transform
             if self._active_handle == handle:
-                self._transform_manager.update_transform(
+                print(f"[SelectionManager] _on_handle_transform: Updating transform")
+                result = self._transform_manager.update_transform(
                     selected_items,
                     pos,
                     handle._handle_type
                 )
+                print(f"[SelectionManager] _on_handle_transform: update_transform returned {result}")
+            else:
+                print(f"[SelectionManager] _on_handle_transform: Active handle mismatch, ignoring")
         elif event_type == "finish":
             # Finish transform
             if self._active_handle == handle:
+                print(f"[SelectionManager] _on_handle_transform: Finishing transform")
                 self._transform_manager.finish_transform()
                 self._active_handle = None
                 # Update handles positions after transform
+                print(f"[SelectionManager] _on_handle_transform: Updating handles")
                 self._update_handles()
+            else:
+                print(f"[SelectionManager] _on_handle_transform: Active handle mismatch on finish, ignoring")
     
     def _update_handles(self):
         """Update handle positions after transformation."""

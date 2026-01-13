@@ -726,6 +726,8 @@ class ImageShape(Shape):
         self.invert = False  # Invert image (swap black/white)
         self.threshold = 128  # For simple threshold mode
         self.dither_mode = "floyd_steinberg"  # Dithering algorithm
+        self.brightness = 0.0  # Brightness adjustment (-100 to 100)
+        self.contrast = 1.0  # Contrast multiplier (0.0 to 3.0, 1.0 = normal)
         
         # Set default laser settings for engraving
         self.laser_settings.operation = "image"
@@ -747,23 +749,29 @@ class ImageShape(Shape):
         return 0
     
     def get_paths(self) -> List[List[Point]]:
-        """Return bounding rectangle path for display."""
-        # Return the bounding box as a rectangle for display purposes
+        """Return bounding rectangle path for display, with full transform support."""
+        # Define rectangle in local coordinates (0,0 to width,height)
+        # apply_transform() will handle scale, rotation, and position
         points = [
-            Point(self.position.x, self.position.y),
-            Point(self.position.x + self.width, self.position.y),
-            Point(self.position.x + self.width, self.position.y + self.height),
-            Point(self.position.x, self.position.y + self.height),
-            Point(self.position.x, self.position.y)  # Close the path
+            Point(0, 0),
+            Point(self.width, 0),
+            Point(self.width, self.height),
+            Point(0, self.height),
+            Point(0, 0)  # Close the path
         ]
-        return [points]
+        return [self.apply_transform(points)]
     
     def get_bounding_box(self) -> BoundingBox:
+        """Return bounding box from transformed paths (handles scale and rotation)."""
+        paths = self.get_paths()
+        all_points = [p for path in paths for p in path]
+        if not all_points:
+            return BoundingBox(0, 0, 0, 0)
         return BoundingBox(
-            min_x=self.position.x,
-            min_y=self.position.y,
-            max_x=self.position.x + self.width,
-            max_y=self.position.y + self.height
+            min_x=min(p.x for p in all_points),
+            min_y=min(p.y for p in all_points),
+            max_x=max(p.x for p in all_points),
+            max_y=max(p.y for p in all_points)
         )
     
     def clone(self) -> 'ImageShape':
@@ -780,6 +788,8 @@ class ImageShape(Shape):
         img.invert = self.invert
         img.threshold = self.threshold
         img.dither_mode = self.dither_mode
+        img.brightness = self.brightness
+        img.contrast = self.contrast
         img.laser_settings = LaserSettings(**self.laser_settings.__dict__)
         return img
     

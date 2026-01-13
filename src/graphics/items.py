@@ -124,9 +124,25 @@ class ShapeGraphicsItem(QGraphicsPathItem):
         """
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # Update shape position when item is moved
+            # The paths include position already, so we need to:
+            # 1. Calculate delta from item's pos() movement
+            # 2. Add delta to shape.position
+            # 3. Rebuild path (which will include new position)
+            # 4. Reset item pos() to 0,0
             if self._shape:
                 new_pos = self.pos()
-                self._shape.position = Point(new_pos.x(), new_pos.y())
+                if new_pos.x() != 0 or new_pos.y() != 0:
+                    print(f"[ShapeGraphicsItem] itemChange: Item moved, new_pos=({new_pos.x():.2f}, {new_pos.y():.2f})")
+                    print(f"  shape.position before=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
+                    # Add movement delta to shape position
+                    self._shape.position.x += new_pos.x()
+                    self._shape.position.y += new_pos.y()
+                    print(f"  shape.position after=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
+                    # Rebuild path with new position baked in
+                    self._update_path()
+                    # Reset item position (path now includes the position)
+                    self.setPos(0, 0)
+                    print(f"  Reset item pos to (0, 0)")
         
         return super().itemChange(change, value)
     
@@ -148,6 +164,13 @@ class ShapeGraphicsItem(QGraphicsPathItem):
     
     def update_from_shape(self):
         """Update the graphics item when the underlying shape changes."""
+        if self._shape:
+            print(f"[ShapeGraphicsItem] update_from_shape: shape_id={self._shape.id}")
+            print(f"  shape.position=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
+            print(f"  shape.scale=({self._shape.scale_x:.3f}, {self._shape.scale_y:.3f})")
+            if hasattr(self._shape, 'rotation'):
+                import math
+                print(f"  shape.rotation={math.degrees(self._shape.rotation):.2f}°")
         self._update_path()
         self.update()
     
@@ -162,6 +185,7 @@ class ImageGraphicsItem(QGraphicsItem):
     A QGraphicsItem that displays an ImageShape.
     
     This renders the actual image data, not just an outline.
+    Position is handled via setPos(), scale/rotation are applied in paint().
     """
     
     def __init__(self, image_shape: ImageShape, parent: Optional[QGraphicsItem] = None):
@@ -191,11 +215,11 @@ class ImageGraphicsItem(QGraphicsItem):
         # Store shape reference in item data
         self.setData(0, image_shape)
         
-        # Set position
+        # Set position - this is the only positioning, no transform for position
         self.setPos(image_shape.position.x, image_shape.position.y)
     
     def _update_pixmap(self):
-        """Update the QPixmap from the image shape's data."""
+        """Update the QPixmap from the image shape's data with adjustments applied."""
         if self._shape.image_data is None:
             self._pixmap = None
             return
@@ -203,11 +227,26 @@ class ImageGraphicsItem(QGraphicsItem):
         import numpy as np
         
         # Get image data
-        img_data = self._shape.image_data
+        img_data = self._shape.image_data.copy()
+        
+        # Apply brightness/contrast adjustments for preview
+        brightness = getattr(self._shape, 'brightness', 0.0)
+        contrast = getattr(self._shape, 'contrast', 1.0)
+        
+        if brightness != 0 or contrast != 1.0:
+            # Apply brightness and contrast
+            img_float = img_data.astype(np.float32)
+            img_float = (img_float - 127.5) * contrast + 127.5
+            img_float += brightness
+            img_data = np.clip(img_float, 0, 255).astype(np.uint8)
+        
+        # Apply invert if enabled
+        if getattr(self._shape, 'invert', False):
+            img_data = 255 - img_data
+        
         height, width = img_data.shape
         
-        # Convert grayscale to RGBA for QImage
-        # Grayscale needs to be converted to RGB format
+        # Convert grayscale to RGB for QImage
         rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
         
         # Create QImage from numpy array
@@ -219,9 +258,9 @@ class ImageGraphicsItem(QGraphicsItem):
             QImage.Format.Format_RGB888
         )
         
-        # Scale to display size
+        # Scale to display size (3 pixels per mm for display)
         scaled_image = qimage.scaled(
-            int(self._shape.width * 3),  # Scale up for display (3 pixels per mm)
+            int(self._shape.width * 3),
             int(self._shape.height * 3),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
@@ -229,9 +268,20 @@ class ImageGraphicsItem(QGraphicsItem):
         
         self._pixmap = QPixmap.fromImage(scaled_image)
     
+    def refresh(self):
+        """Refresh the pixmap to reflect setting changes."""
+        self._update_pixmap()
+        self.prepareGeometryChange()
+        self.update()
+    
     def boundingRect(self) -> QRectF:
-        """Return the bounding rectangle."""
-        return QRectF(0, 0, self._shape.width, self._shape.height)
+        """Return the bounding rectangle (actual size including scale)."""
+        if self._shape:
+            # Return ACTUAL size (base * scale) so handles appear at correct positions
+            actual_width = self._shape.width * abs(self._shape.scale_x)
+            actual_height = self._shape.height * abs(self._shape.scale_y)
+            return QRectF(0, 0, actual_width, actual_height)
+        return QRectF(0, 0, 100, 100)
     
     def shape(self) -> QPainterPath:
         """Return the shape for hit testing."""
@@ -240,20 +290,49 @@ class ImageGraphicsItem(QGraphicsItem):
         return path
     
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget=None):
-        """Paint the image."""
-        rect = self.boundingRect()
+        """Paint the image with scale and rotation applied."""
+        if not self._shape:
+            return
         
+        import math
+        
+        # Get actual size
+        actual_width = self._shape.width * abs(self._shape.scale_x)
+        actual_height = self._shape.height * abs(self._shape.scale_y)
+        rect = QRectF(0, 0, actual_width, actual_height)
+        
+        # Save painter state
+        painter.save()
+        
+        # Apply rotation around center
+        if abs(self._shape.rotation) > 0.001:
+            center = rect.center()
+            painter.translate(center)
+            painter.rotate(math.degrees(self._shape.rotation))
+            painter.translate(-center)
+        
+        # Handle negative scale (mirroring)
+        if self._shape.scale_x < 0 or self._shape.scale_y < 0:
+            center = rect.center()
+            painter.translate(center)
+            painter.scale(
+                -1 if self._shape.scale_x < 0 else 1,
+                -1 if self._shape.scale_y < 0 else 1
+            )
+            painter.translate(-center)
+        
+        # Draw image or placeholder
         if self._pixmap and not self._pixmap.isNull():
-            # Draw the image scaled to fit
             painter.drawPixmap(rect.toRect(), self._pixmap)
         else:
-            # Draw placeholder if no image
             painter.setPen(QPen(QColor(100, 100, 100), 1))
             painter.setBrush(QBrush(QColor(60, 60, 60)))
             painter.drawRect(rect)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Image")
         
-        # Draw selection border
+        painter.restore()
+        
+        # Draw selection/hover border (not rotated - around bounding box)
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setPen(QPen(QColor(0, 120, 215), 2))
             painter.setBrush(QBrush())
@@ -269,14 +348,24 @@ class ImageGraphicsItem(QGraphicsItem):
             # Update shape position when item is moved
             if self._shape:
                 new_pos = self.pos()
-                self._shape.position = Point(new_pos.x(), new_pos.y())
+                self._shape.position.x = new_pos.x()
+                self._shape.position.y = new_pos.y()
         
         return super().itemChange(change, value)
     
     def update_from_shape(self):
         """Update the graphics item when the underlying shape changes."""
+        # Notify Qt that geometry is changing
+        self.prepareGeometryChange()
+        
+        if self._shape:
+            # Update position
+            self.setPos(self._shape.position.x, self._shape.position.y)
+        
+        # Update pixmap (applies brightness/contrast/invert settings)
         self._update_pixmap()
-        self.setPos(self._shape.position.x, self._shape.position.y)
+        
+        # Trigger repaint
         self.update()
     
     @property
@@ -376,6 +465,7 @@ class SelectionHandleItem(QGraphicsItem):
             # Get scene position from the event
             scene_pos = event.scenePos()
             self._start_pos = scene_pos
+            print(f"[HANDLE] mousePressEvent: handle_type={self._handle_type}, scene_pos=({scene_pos.x():.2f}, {scene_pos.y():.2f})")
             if self._transform_callback:
                 self._transform_callback(self, "start", scene_pos)
             event.accept()  # Accept the event so parent doesn't get it
@@ -387,6 +477,7 @@ class SelectionHandleItem(QGraphicsItem):
         if self._is_pressed and self._transform_callback:
             # Get scene position from the event
             scene_pos = event.scenePos()
+            print(f"[HANDLE] mouseMoveEvent: handle_type={self._handle_type}, scene_pos=({scene_pos.x():.2f}, {scene_pos.y():.2f})")
             self._transform_callback(self, "update", scene_pos)
             event.accept()  # Accept the event
         else:
@@ -398,6 +489,7 @@ class SelectionHandleItem(QGraphicsItem):
             self._is_pressed = False
             if self._transform_callback:
                 scene_pos = event.scenePos()
+                print(f"[HANDLE] mouseReleaseEvent: handle_type={self._handle_type}, scene_pos=({scene_pos.x():.2f}, {scene_pos.y():.2f})")
                 self._transform_callback(self, "finish", scene_pos)
             self._start_pos = None
             event.accept()  # Accept the event

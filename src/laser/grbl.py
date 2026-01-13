@@ -205,6 +205,12 @@ class GRBLController(LaserController):
         """Disconnect from GRBL controller."""
         self._running = False
         
+        # If a job is running, mark it as cancelled/error
+        if self.status.job_state in (JobState.RUNNING, JobState.PAUSED):
+            self.status.job_state = JobState.CANCELLED
+            self.status.error_message = "Controller disconnected"
+            self._notify_status()
+        
         # Stop reader thread
         if self._reader_thread:
             self._reader_thread.join(timeout=2.0)
@@ -231,6 +237,13 @@ class GRBLController(LaserController):
                 print(f"Error closing serial port: {e}")
             finally:
                 self._serial = None
+        
+        # Clear job state
+        self._gcode_lines = []
+        self._current_line = 0
+        self._buffer_count = 0
+        self.status.job_state = JobState.IDLE
+        self.status.progress = 0.0
         
         self.status.state = ConnectionState.DISCONNECTED
         self.status.error_message = ""
@@ -560,20 +573,28 @@ class GRBLController(LaserController):
         if self.status.job_state != JobState.RUNNING:
             return False
         
-        self._send_realtime(self.CMD_FEED_HOLD)
-        self.status.job_state = JobState.PAUSED
-        self._notify_status()
-        return True
+        try:
+            self._send_realtime(self.CMD_FEED_HOLD)
+            self.status.job_state = JobState.PAUSED
+            self._notify_status()
+            return True
+        except Exception as e:
+            print(f"Error pausing job: {e}")
+            return False
     
     def resume_job(self) -> bool:
         """Resume a paused job."""
         if self.status.job_state != JobState.PAUSED:
             return False
         
-        self._send_realtime(self.CMD_CYCLE_START)
-        self.status.job_state = JobState.RUNNING
-        self._notify_status()
-        return True
+        try:
+            self._send_realtime(self.CMD_CYCLE_START)
+            self.status.job_state = JobState.RUNNING
+            self._notify_status()
+            return True
+        except Exception as e:
+            print(f"Error resuming job: {e}")
+            return False
     
     def stop_job(self) -> bool:
         """Stop and cancel the current job."""
@@ -771,7 +792,7 @@ class GRBLController(LaserController):
             if match.group(5):  # Buffer info
                 self.status.buffer_space = int(match.group(5))
             
-            # Map GRBL state to our state
+            # Map GRBL state to our connection state
             state_map = {
                 'Idle': ConnectionState.CONNECTED,
                 'Run': ConnectionState.BUSY,
@@ -781,6 +802,26 @@ class GRBLController(LaserController):
                 'Check': ConnectionState.CONNECTED,
                 'Home': ConnectionState.BUSY,
             }
+            
+            # Update job state based on GRBL state
+            if state == 'Run':
+                # GRBL is running a job
+                if self.status.job_state != JobState.RUNNING:
+                    self.status.job_state = JobState.RUNNING
+            elif state == 'Hold':
+                # GRBL is in hold (paused) - update job state if we have a job
+                if self.status.job_state == JobState.RUNNING:
+                    self.status.job_state = JobState.PAUSED
+            elif state == 'Idle':
+                # GRBL is idle - check if we had a running job
+                if self.status.job_state == JobState.RUNNING:
+                    # Job completed
+                    self.status.job_state = JobState.COMPLETED
+                    self.status.progress = 100.0
+                elif self.status.job_state == JobState.PAUSED:
+                    # Job was paused and is now idle (might have been cancelled)
+                    # Don't change state - keep it paused until user resumes or cancels
+                    pass
             
             # Detect homing state transitions
             if 'Home' in state:
@@ -807,6 +848,9 @@ class GRBLController(LaserController):
                     "- Hardware fault\n\n"
                     "Use Console to send '$X' to unlock after resolving the issue."
                 )
+                # If job was running, mark as error
+                if self.status.job_state in (JobState.RUNNING, JobState.PAUSED):
+                    self.status.job_state = JobState.ERROR
                 self._notify_status()
             
             self.status.state = state_map.get(state, ConnectionState.CONNECTED)
@@ -829,13 +873,27 @@ class GRBLController(LaserController):
             self._buffer_count += 1
             self._current_line += 1
             
-            # Update progress
+            # Update progress - notify every line or every 10 lines for performance
+            if self._current_line % 10 == 0 or self._current_line == len(self._gcode_lines):
+                self.status.progress = (self._current_line / len(self._gcode_lines)) * 100
+                self._notify_status()
+        
+        # Final progress update
+        if len(self._gcode_lines) > 0:
             self.status.progress = (self._current_line / len(self._gcode_lines)) * 100
             self._notify_status()
         
         # Wait for completion
         while self._buffer_count > 0 and self.status.job_state == JobState.RUNNING:
             time.sleep(0.1)
+            # Update progress while waiting (buffer draining)
+            if len(self._gcode_lines) > 0:
+                # Progress is based on lines sent, but we're waiting for buffer to drain
+                # Estimate: lines sent + some buffer progress
+                estimated_progress = min(99.0, (self._current_line / len(self._gcode_lines)) * 100)
+                if abs(estimated_progress - self.status.progress) > 1.0:  # Update if changed by >1%
+                    self.status.progress = estimated_progress
+                    self._notify_status()
         
         if self.status.job_state == JobState.RUNNING:
             self.status.job_state = JobState.COMPLETED

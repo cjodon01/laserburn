@@ -15,6 +15,7 @@ from ...laser.controller import ConnectionState, JobState
 from ...laser.job_manager import JobPriority
 from ...laser.gcode_generator import StartFrom, JobOrigin
 from ..widgets.console_widget import ConsoleWidget
+from ..widgets.gcode_preview_widget import GCodePreviewWidget
 
 
 class LaserPanel(QWidget):
@@ -74,6 +75,10 @@ class LaserPanel(QWidget):
         # Console tab
         console_tab = self._create_console_tab()
         tabs.addTab(console_tab, "Console")
+        
+        # Preview tab
+        preview_tab = self._create_preview_tab()
+        tabs.addTab(preview_tab, "Preview")
         
         layout.addWidget(tabs)
         self.setLayout(layout)
@@ -426,6 +431,54 @@ class LaserPanel(QWidget):
         widget.setLayout(layout)
         return widget
     
+    def _create_preview_tab(self):
+        """Create the G-code preview tab."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        
+        # Controls
+        controls = QHBoxLayout()
+        self.generate_preview_btn = QPushButton("Generate Preview")
+        self.generate_preview_btn.setToolTip("Generate burn preview from current document")
+        controls.addWidget(self.generate_preview_btn)
+        
+        load_preview_btn = QPushButton("Load G-Code File...")
+        load_preview_btn.setToolTip("Load G-code file to preview")
+        load_preview_btn.clicked.connect(self._load_gcode_preview)
+        controls.addWidget(load_preview_btn)
+        
+        controls.addStretch()
+        layout.addLayout(controls)
+        
+        # Create preview widget
+        self.preview_widget = GCodePreviewWidget()
+        layout.addWidget(self.preview_widget)
+        
+        widget.setLayout(layout)
+        return widget
+    
+    def _load_gcode_preview(self):
+        """Load G-code file for preview."""
+        from PyQt6.QtWidgets import QFileDialog
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load G-Code File",
+            "",
+            "G-Code Files (*.gcode *.nc *.ngc);;All Files (*)"
+        )
+        if filepath and hasattr(self, 'preview_widget'):
+            self.preview_widget.load_gcode(filepath)
+    
+    def set_document_for_preview(self, document):
+        """Set document for preview generation."""
+        self._preview_document = document
+        if hasattr(self, 'generate_preview_btn'):
+            self.generate_preview_btn.clicked.connect(
+                lambda: self.generate_preview_from_document(document)
+            )
+    
     def _jog(self, x: float, y: float, z: float):
         """Execute a jog movement."""
         if not self._controller:
@@ -727,3 +780,47 @@ class LaserPanel(QWidget):
         # Material settings are now applied directly to layers via the layers panel
         # This method is kept for compatibility but does nothing
         pass
+    
+    def update_preview_from_gcode(self, gcode_content: str):
+        """Update preview widget from G-code content."""
+        if hasattr(self, 'preview_widget'):
+            # Save to temp file and load it
+            import tempfile
+            import os
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.gcode', delete=False) as f:
+                f.write(gcode_content)
+                temp_path = f.name
+            
+            try:
+                self.preview_widget.load_gcode(temp_path)
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+    
+    def update_preview_from_file(self, filepath: str):
+        """Update preview widget from G-code file."""
+        if hasattr(self, 'preview_widget'):
+            self.preview_widget.load_gcode(filepath)
+    
+    def generate_preview_from_document(self, document):
+        """Generate preview from document without saving G-code file."""
+        if not hasattr(self, 'preview_widget'):
+            return
+        
+        try:
+            from ...laser.gcode_generator import GCodeGenerator, GCodeSettings
+            
+            # Generate G-code in memory
+            settings = GCodeSettings()
+            generator = GCodeGenerator(settings)
+            gcode, _ = generator.generate(document)
+            
+            # Update preview from G-code content
+            self.update_preview_from_gcode(gcode)
+        except Exception as e:
+            print(f"Error generating preview: {e}")
+            import traceback
+            traceback.print_exc()

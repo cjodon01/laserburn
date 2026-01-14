@@ -607,6 +607,10 @@ class MainWindow(QMainWindow):
         self.laser_panel.set_controller(self._controller)
         self.laser_panel.set_job_manager(self._job_manager)
         
+        # Set document for preview
+        if hasattr(self.laser_panel, 'set_document_for_preview'):
+            self.laser_panel.set_document_for_preview(self.document)
+        
         # Connect laser panel signals
         self.laser_panel.connect_requested.connect(self._on_connect_laser)
         self.laser_panel.disconnect_requested.connect(self._on_disconnect_laser)
@@ -1011,6 +1015,11 @@ class MainWindow(QMainWindow):
                 if warnings:
                     QMessageBox.warning(self, "G-code Warnings", "\n".join(warnings))
                 generator.save_to_file(gcode, filepath)
+                
+                # Update preview in laser panel
+                if hasattr(self.laser_panel, 'update_preview_from_file'):
+                    self.laser_panel.update_preview_from_file(filepath)
+                
                 self.status_bar.showMessage(f"Exported to {filepath}")
             except Exception as e:
                 QMessageBox.warning(self, "Export Error", f"Failed to export G-code:\n{e}")

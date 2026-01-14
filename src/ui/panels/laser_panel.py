@@ -42,6 +42,11 @@ class LaserPanel(QWidget):
         self._current_job = None
         self._jog_speed = 1000.0  # mm/min
         self._jog_distance = 1.0  # mm per step
+        # Cache for generated G-code to avoid regenerating
+        self._cached_gcode = None
+        self._cached_settings = None
+        self._cached_document_id = None  # Track document version to invalidate cache
+        self._cached_warnings = []
         self._init_ui()
     
     def set_controller(self, controller):
@@ -444,6 +449,12 @@ class LaserPanel(QWidget):
         self.generate_preview_btn.setToolTip("Generate burn preview from current document")
         controls.addWidget(self.generate_preview_btn)
         
+        # Connect button if document is already set
+        if hasattr(self, '_preview_document') and self._preview_document:
+            self.generate_preview_btn.clicked.connect(
+                lambda: self.generate_preview_from_document(self._preview_document)
+            )
+        
         load_preview_btn = QPushButton("Load G-Code File...")
         load_preview_btn.setToolTip("Load G-code file to preview")
         load_preview_btn.clicked.connect(self._load_gcode_preview)
@@ -475,8 +486,15 @@ class LaserPanel(QWidget):
         """Set document for preview generation."""
         self._preview_document = document
         if hasattr(self, 'generate_preview_btn'):
+            # Disconnect any existing connections to avoid duplicates
+            try:
+                self.generate_preview_btn.clicked.disconnect()
+            except TypeError:
+                # No connections to disconnect
+                pass
+            # Connect to use the stored document reference
             self.generate_preview_btn.clicked.connect(
-                lambda: self.generate_preview_from_document(document)
+                lambda: self.generate_preview_from_document(self._preview_document)
             )
     
     def _jog(self, x: float, y: float, z: float):
@@ -782,45 +800,210 @@ class LaserPanel(QWidget):
         pass
     
     def update_preview_from_gcode(self, gcode_content: str):
-        """Update preview widget from G-code content."""
+        """Update preview from G-code content."""
         if hasattr(self, 'preview_widget'):
             # Save to temp file and load it
             import tempfile
             import os
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.gcode', delete=False) as f:
-                f.write(gcode_content)
-                temp_path = f.name
             
+            # On Windows, we need to close the file before reading it
+            # Use a regular file write instead of NamedTemporaryFile
+            temp_path = None
             try:
+                # Create temp file with explicit encoding
+                fd, temp_path = tempfile.mkstemp(suffix='.gcode', text=True)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(gcode_content)
+                
+                # File is now closed, safe to read on Windows
                 self.preview_widget.load_gcode(temp_path)
             finally:
                 # Clean up temp file
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
     
     def update_preview_from_file(self, filepath: str):
         """Update preview widget from G-code file."""
         if hasattr(self, 'preview_widget'):
             self.preview_widget.load_gcode(filepath)
     
+    def get_cached_gcode(self, document, settings):
+        """
+        Get cached G-code if available and settings match.
+        
+        Args:
+            document: The document to check cache for
+            settings: GCodeSettings to match against cache
+        
+        Returns:
+            (gcode, warnings) tuple if cache is valid, None otherwise
+        """
+        document_fingerprint = self._get_document_fingerprint(document)
+        if (self._cached_gcode and 
+            self._cached_document_id == document_fingerprint and
+            self._cached_settings and
+            self._cached_settings.start_from == settings.start_from and
+            self._cached_settings.job_origin == settings.job_origin):
+            return self._cached_gcode, self._cached_warnings
+        return None
+    
+    def invalidate_gcode_cache(self):
+        """Invalidate the G-code cache (call when document changes)."""
+        self._cached_gcode = None
+        self._cached_settings = None
+        self._cached_document_id = None
+        self._cached_warnings = []
+    
+    def _get_document_fingerprint(self, document):
+        """
+        Generate a fingerprint/hash of document content that affects G-code generation.
+        
+        This changes when the document is modified, allowing cache invalidation.
+        """
+        import hashlib
+        
+        # Collect all relevant document state that affects G-code
+        fingerprint_data = []
+        
+        # Document dimensions
+        fingerprint_data.append(f"size:{document.width:.2f}x{document.height:.2f}")
+        
+        # Layer information (visibility, cut_order, shape count)
+        for layer in document.layers:
+            layer_info = f"layer:{layer.name}:v{layer.visible}:o{layer.cut_order}:s{len(layer.shapes)}"
+            fingerprint_data.append(layer_info)
+            
+            # Shape information (visibility, type, basic properties)
+            for shape in layer.shapes:
+                shape_type = type(shape).__name__
+                shape_visible = shape.visible
+                # Get bounding box for shape position/size
+                try:
+                    bbox = shape.get_bounding_box()
+                    shape_info = f"shape:{shape_type}:v{shape_visible}:{bbox.min_x:.2f},{bbox.min_y:.2f},{bbox.max_x:.2f},{bbox.max_y:.2f}"
+                except:
+                    shape_info = f"shape:{shape_type}:v{shape_visible}"
+                fingerprint_data.append(shape_info)
+        
+        # Cylinder settings
+        if document.cylinder_params:
+            fingerprint_data.append(f"cylinder:{document.cylinder_params.diameter:.2f}:{document.cylinder_params.max_angle:.2f}")
+        fingerprint_data.append(f"cylinder_power:{document.cylinder_compensate_power}")
+        fingerprint_data.append(f"cylinder_z:{document.cylinder_compensate_z}")
+        
+        # Create hash
+        fingerprint_str = "|".join(fingerprint_data)
+        return hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
     def generate_preview_from_document(self, document):
         """Generate preview from document without saving G-code file."""
+        print(f"DEBUG: generate_preview_from_document called with document: {document}")
+        
         if not hasattr(self, 'preview_widget'):
+            QMessageBox.warning(
+                self,
+                "Preview Error",
+                "Preview widget not initialized."
+            )
+            return
+        
+        if not document:
+            QMessageBox.warning(
+                self,
+                "Preview Error",
+                "No document available to generate preview."
+            )
+            return
+        
+        # Check if document has any visible shapes
+        has_visible_shapes = False
+        for layer in document.layers:
+            if layer.visible:
+                for shape in layer.shapes:
+                    if shape.visible:
+                        has_visible_shapes = True
+                        break
+                if has_visible_shapes:
+                    break
+        
+        if not has_visible_shapes:
+            QMessageBox.information(
+                self,
+                "No Content",
+                "Document has no visible shapes to preview.\n\n"
+                "Make sure you have shapes in visible layers."
+            )
             return
         
         try:
             from ...laser.gcode_generator import GCodeGenerator, GCodeSettings
             
-            # Generate G-code in memory
+            # Use UI settings (same as export would use)
             settings = GCodeSettings()
-            generator = GCodeGenerator(settings)
-            gcode, _ = generator.generate(document)
+            if hasattr(self, 'get_start_from'):
+                settings.start_from = self.get_start_from()
+            if hasattr(self, 'get_job_origin'):
+                settings.job_origin = self.get_job_origin()
+            
+            # Check cache first using document fingerprint
+            document_fingerprint = self._get_document_fingerprint(document)
+            if (self._cached_gcode and 
+                self._cached_document_id == document_fingerprint and
+                self._cached_settings and
+                self._cached_settings.start_from == settings.start_from and
+                self._cached_settings.job_origin == settings.job_origin):
+                print("Using cached G-code for preview")
+                gcode = self._cached_gcode
+                warnings = self._cached_warnings
+            else:
+                # Generate G-code in memory
+                generator = GCodeGenerator(settings)
+                gcode, warnings = generator.generate(document)
+                
+                # Cache the result
+                self._cached_gcode = gcode
+                self._cached_settings = settings
+                self._cached_document_id = document_fingerprint
+                self._cached_warnings = warnings
+                print("Generated and cached new G-code")
+            
+            # Check if G-code was generated
+            if not gcode or not gcode.strip():
+                QMessageBox.warning(
+                    self,
+                    "Preview Error",
+                    "G-code generation produced no output.\n\n"
+                    "Check that your shapes are valid and visible."
+                )
+                return
+            
+            # Show warnings if any
+            if warnings:
+                warning_text = "\n".join(warnings[:5])  # Show first 5 warnings
+                if len(warnings) > 5:
+                    warning_text += f"\n... and {len(warnings) - 5} more"
+                QMessageBox.warning(
+                    self,
+                    "G-code Generation Warnings",
+                    f"The following warnings occurred:\n\n{warning_text}"
+                )
             
             # Update preview from G-code content
             self.update_preview_from_gcode(gcode)
+            
         except Exception as e:
-            print(f"Error generating preview: {e}")
+            error_msg = str(e)
             import traceback
-            traceback.print_exc()
+            traceback_str = traceback.format_exc()
+            print(f"Error generating preview: {error_msg}")
+            print(traceback_str)
+            
+            QMessageBox.critical(
+                self,
+                "Preview Generation Failed",
+                f"Failed to generate preview:\n\n{error_msg}\n\n"
+                "Check the console for detailed error information."
+            )

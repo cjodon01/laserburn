@@ -265,10 +265,15 @@ class WarpedDesignPreviewWidget(QWidget):
 class CylinderDialog(QDialog):
     """Dialog for cylinder engraving settings."""
     
-    def __init__(self, parent=None, initial_params: Optional[CylinderParams] = None):
+    def __init__(self, parent=None, initial_params: Optional[CylinderParams] = None,
+                 warp_image: bool = False, compensate_power: bool = False, compensate_z: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Cylinder Engraving Settings")
         self.setMinimumWidth(450)
+        # Store initial checkbox states
+        self._initial_warp_image = warp_image
+        self._initial_compensate_power = compensate_power
+        self._initial_compensate_z = compensate_z
         self._init_ui()
         
         if initial_params:
@@ -335,21 +340,21 @@ class CylinderDialog(QDialog):
         options_layout = QVBoxLayout()
         
         self.warp_image_check = QCheckBox("Warp image for cylinder curvature")
-        self.warp_image_check.setChecked(True)
+        self.warp_image_check.setChecked(self._initial_warp_image)
         self.warp_image_check.setToolTip(
             "Pre-distort the image so it appears correct on the curved surface"
         )
         options_layout.addWidget(self.warp_image_check)
         
         self.power_comp_check = QCheckBox("Apply power compensation")
-        self.power_comp_check.setChecked(True)
+        self.power_comp_check.setChecked(self._initial_compensate_power)
         self.power_comp_check.setToolTip(
             "Automatically adjust laser power based on surface angle"
         )
         options_layout.addWidget(self.power_comp_check)
         
         self.z_comp_check = QCheckBox("Apply Z compensation (if available)")
-        self.z_comp_check.setChecked(False)
+        self.z_comp_check.setChecked(self._initial_compensate_z)
         self.z_comp_check.setToolTip(
             "Adjust Z-axis to maintain focus (requires Z-axis control)"
         )

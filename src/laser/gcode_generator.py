@@ -531,9 +531,12 @@ class GCodeGenerator:
         # Get image position in canvas coordinates
         # ImageShape.position is the top-left corner in canvas coordinates
         # Canvas: origin at top-left, Y increases downward
-        img_top_left_x = image_shape.position.x
-        img_top_left_y = image_shape.position.y
-        img_bottom_y = img_top_left_y + out_height_mm  # Bottom edge in canvas coords
+        # IMPORTANT: Use the actual bounding box to get the correct position
+        # This ensures we use the transformed position (accounting for scale/rotation)
+        img_bbox = image_shape.get_bounding_box()
+        img_top_left_x = img_bbox.min_x
+        img_top_left_y = img_bbox.min_y
+        img_bottom_y = img_bbox.max_y  # Bottom edge in canvas coords
         
         # Use M4 (dynamic power mode) for image engraving (like LightBurn)
         self._emit("M4 ; Dynamic power mode for image engraving")
@@ -543,8 +546,11 @@ class GCodeGenerator:
         
         # Image scanlines are always done in relative mode internally
         # If we're not already in relative mode, switch to it
+        # IMPORTANT: Store whether we switched modes so we can restore it later
+        switched_to_relative = False
         if not self._use_relative_mode:
             self._emit("G91 ; Relative mode for image scanlines")
+            switched_to_relative = True
         
         # Generate scanlines (bidirectional for efficiency)
         # Scanlines go from bottom to top in canvas coordinates
@@ -687,6 +693,8 @@ class GCodeGenerator:
                 # Calculate X position for start of this scanline
                 if line_idx == 0:
                     # First scanline: move to start position
+                    # CRITICAL: Use absolute coordinates for the first move to ensure correct positioning
+                    # This prevents coordinate drift when images are enlarged
                     if reverse:
                         # Start at right edge
                         canvas_x_start = img_top_left_x + out_width_mm
@@ -696,10 +704,19 @@ class GCodeGenerator:
                     
                     # Convert to laser coordinates
                     laser_start = self._canvas_to_laser(Point(canvas_x_start, canvas_y), document_height, document_width)
-                    dx = laser_start.x - self._current_x
-                    dy = laser_start.y - self._current_y
-                    if abs(dx) > 0.001 or abs(dy) > 0.001:
-                        self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to scanline start")
+                    
+                    # If we're in relative mode, temporarily switch to absolute for the first move
+                    # This ensures the G-code starts at the correct absolute position
+                    if self._use_relative_mode:
+                        self._emit("G90 ; Temporary absolute mode for initial positioning")
+                        self._emit(f"G0 X{laser_start.x:.3f} Y{laser_start.y:.3f} ; Move to scanline start (image at {img_top_left_x:.2f}, {img_top_left_y:.2f})")
+                        self._emit("G91 ; Back to relative mode for scanlines")
+                    else:
+                        dx = laser_start.x - self._current_x
+                        dy = laser_start.y - self._current_y
+                        if abs(dx) > 0.0001 or abs(dy) > 0.0001:
+                            self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to scanline start (image at {img_top_left_x:.2f}, {img_top_left_y:.2f})")
+                    
                     self._current_x = laser_start.x
                     self._current_y = laser_start.y
                 else:
@@ -746,10 +763,11 @@ class GCodeGenerator:
                         self._emit(f"G1 X{move_mm:.3f} S{s_value}")
                         self._current_x += move_mm
         
-        # Switch back to absolute mode ONLY if we weren't in relative mode to begin with
+        # Switch back to absolute mode ONLY if we switched to relative mode for this image
         # (for current position mode, we stay in relative mode)
-        if not self._use_relative_mode:
+        if switched_to_relative:
             self._emit("G90 ; Back to absolute mode")
+            self._use_relative_mode = False
         
         # Turn off laser and restore M3 mode
         self._emit("M5 ; Laser off")

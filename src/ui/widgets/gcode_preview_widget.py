@@ -6,7 +6,7 @@ Shows a burn preview by parsing G-code and rendering where the laser will actual
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog
 from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QWheelEvent, QMouseEvent
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QWheelEvent, QMouseEvent, QPixmap, QImage
 import re
 from typing import List, Tuple, Optional
 from pathlib import Path
@@ -19,12 +19,14 @@ class GCodePreviewWidget(QWidget):
         super().__init__(parent)
         self._engraving_points: List[Tuple[float, float]] = []
         self._bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, max_x, min_y, max_y
+        self._preview_pixmap: Optional[QPixmap] = None  # Cached preview image
         self._scale = 1.0
         self._offset_x = 0.0
         self._offset_y = 0.0
         self._pan_start = QPointF()
         self._is_panning = False
         self._zoom = 1.0
+        self._max_points_to_render = 500000  # Limit for performance
         
         self.setMinimumSize(400, 300)
         self.setMouseTracking(True)
@@ -36,22 +38,57 @@ class GCodePreviewWidget(QWidget):
         """Load and parse G-code file."""
         self._engraving_points = []
         self._bounds = None
+        self._preview_pixmap = None
         
         try:
-            with open(filepath, 'r') as f:
+            print(f"Loading G-code file: {filepath}")
+            with open(filepath, 'r', encoding='utf-8') as f:
+                # For very large files, read in chunks
                 lines = f.readlines()
+            
+            total_lines = len(lines)
+            print(f"Parsing {total_lines:,} lines...")
             
             # Parse G-code
             x = 0.0
             y = 0.0
             relative_mode = False
+            laser_on = False  # Track laser state across lines
+            current_power = 0
+            
+            # Try to parse bounds from header comment for validation
+            expected_bounds = None
+            for line in lines[:50]:  # Check first 50 lines for bounds comment
+                if 'Bounds:' in line or 'bounds:' in line.lower():
+                    # Parse: ; Bounds: X0.00 Y12.50 to X300.00 Y200.00
+                    bounds_match = re.search(r'X([-\d.]+)\s+Y([-\d.]+)\s+to\s+X([-\d.]+)\s+Y([-\d.]+)', line)
+                    if bounds_match:
+                        expected_bounds = (
+                            float(bounds_match.group(1)),  # min_x
+                            float(bounds_match.group(3)),  # max_x
+                            float(bounds_match.group(2)),  # min_y
+                            float(bounds_match.group(4))   # max_y
+                        )
+                        print(f"Found bounds in header: X[{expected_bounds[0]:.2f}, {expected_bounds[1]:.2f}] Y[{expected_bounds[2]:.2f}, {expected_bounds[3]:.2f}]")
+                        break
             
             min_x = float('inf')
             max_x = float('-inf')
             min_y = float('inf')
             max_y = float('-inf')
             
-            for line in lines:
+            point_count = 0
+            sample_rate = 1  # Will adjust for very large files
+            
+            # Check file size to determine if we need sampling
+            if total_lines > 100000:
+                # For very large files, sample points to improve performance
+                estimated_points = total_lines // 2  # Rough estimate
+                if estimated_points > self._max_points_to_render:
+                    sample_rate = max(1, estimated_points // self._max_points_to_render)
+                    print(f"Large file detected. Using sample rate of 1:{sample_rate} for preview")
+            
+            for line_num, line in enumerate(lines):
                 line = line.strip()
                 if not line or line.startswith(';'):
                     continue
@@ -61,6 +98,18 @@ class GCodePreviewWidget(QWidget):
                     relative_mode = False
                 elif 'G91' in line:
                     relative_mode = True
+                
+                # Check for laser on/off commands (M3 = on, M4 = dynamic mode, M5 = off)
+                if 'M3' in line or 'M03' in line or 'M4' in line or 'M04' in line:
+                    laser_on = True
+                    # Extract S value if present
+                    s_match = re.search(r'S(\d+)', line)
+                    if s_match:
+                        current_power = int(s_match.group(1))
+                        laser_on = (current_power > 0)
+                elif 'M5' in line or 'M05' in line:
+                    laser_on = False
+                    current_power = 0
                 
                 # Parse G0/G1 moves
                 if line.startswith('G0') or line.startswith('G1'):
@@ -84,23 +133,63 @@ class GCodePreviewWidget(QWidget):
                         else:
                             y = y_val
                     
-                    # Check if laser is on (S > 0)
-                    laser_on = False
+                    # Update laser state if S value is present in this line
                     if s_match:
-                        s_val = int(s_match.group(1))
-                        laser_on = (s_val > 0)
+                        current_power = int(s_match.group(1))
+                        laser_on = (current_power > 0)
                     
-                    # Record engraving point if laser is on
-                    if laser_on:
-                        self._engraving_points.append((x, y))
-                        min_x = min(min_x, x)
-                        max_x = max(max_x, x)
-                        min_y = min(min_y, y)
-                        max_y = max(max_y, y)
+                    # Record engraving point if laser is on (for G1 moves)
+                    # G0 is rapid move (usually laser off), G1 is cutting move (usually laser on)
+                    if line.startswith('G1') and laser_on:
+                        point_count += 1
+                        # Sample points for very large files
+                        if point_count % sample_rate == 0:
+                            self._engraving_points.append((x, y))
+                            min_x = min(min_x, x)
+                            max_x = max(max_x, x)
+                            min_y = min(min_y, y)
+                            max_y = max(max_y, y)
+                
+                # Progress update for large files
+                if total_lines > 100000 and line_num % 100000 == 0:
+                    print(f"  Parsed {line_num:,} / {total_lines:,} lines ({100*line_num//total_lines}%)")
             
             if self._engraving_points:
-                self._bounds = (min_x, max_x, min_y, max_y)
-                self._fit_to_view()
+                # Recalculate bounds from actual points to ensure accuracy
+                actual_min_x = min(p[0] for p in self._engraving_points)
+                actual_max_x = max(p[0] for p in self._engraving_points)
+                actual_min_y = min(p[1] for p in self._engraving_points)
+                actual_max_y = max(p[1] for p in self._engraving_points)
+                self._bounds = (actual_min_x, actual_max_x, actual_min_y, actual_max_y)
+                print(f"Found {len(self._engraving_points):,} points (sampled from {point_count:,} total)")
+                print(f"Calculated bounds: X[{actual_min_x:.2f}, {actual_max_x:.2f}] Y[{actual_min_y:.2f}, {actual_max_y:.2f}]")
+                
+                # Compare with expected bounds if available
+                if expected_bounds:
+                    exp_min_x, exp_max_x, exp_min_y, exp_max_y = expected_bounds
+                    x_diff = abs(actual_min_x - exp_min_x) + abs(actual_max_x - exp_max_x)
+                    y_diff = abs(actual_min_y - exp_min_y) + abs(actual_max_y - exp_max_y)
+                    if x_diff > 0.1 or y_diff > 0.1:
+                        print(f"WARNING: Bounds mismatch! Expected X[{exp_min_x:.2f}, {exp_max_x:.2f}] Y[{exp_min_y:.2f}, {exp_max_y:.2f}]")
+                        print(f"  Difference: X={x_diff:.2f}mm, Y={y_diff:.2f}mm")
+                        # For significant differences, use expected bounds from header
+                        # The header bounds represent the actual design area, while calculated bounds
+                        # may include coordinate system artifacts (like Y=0 when design starts at Y=137)
+                        if x_diff > 5.0 or y_diff > 5.0:
+                            print(f"  Large difference detected - using expected bounds from G-code header")
+                            print(f"  (This eliminates empty space from coordinate system artifacts)")
+                            # Use expected bounds for display, but keep actual points for rendering
+                            self._bounds = expected_bounds
+                        # For small differences, trust calculated bounds
+                
+                # Generate preview pixmap
+                self._generate_preview_pixmap()
+                
+                # Only fit to view if widget has valid size, otherwise defer
+                if self.width() > 0 and self.height() > 0:
+                    self._fit_to_view()
+            else:
+                print("No engraving points found in G-code")
             
             self.update()
             
@@ -108,6 +197,70 @@ class GCodePreviewWidget(QWidget):
             print(f"Error loading G-code: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _generate_preview_pixmap(self):
+        """Generate a pixmap preview of the engraving points for fast rendering."""
+        if not self._engraving_points or not self._bounds:
+            return
+        
+        min_x, max_x, min_y, max_y = self._bounds
+        width_mm = max_x - min_x
+        height_mm = max_y - min_y
+        
+        if width_mm <= 0 or height_mm <= 0:
+            return
+        
+        # Create a high-resolution preview image
+        # Use a reasonable resolution that balances quality and memory
+        max_preview_size = 2000  # Max dimension in pixels
+        aspect_ratio = width_mm / height_mm
+        
+        if aspect_ratio > 1:
+            preview_width = max_preview_size
+            preview_height = int(max_preview_size / aspect_ratio)
+        else:
+            preview_height = max_preview_size
+            preview_width = int(max_preview_size * aspect_ratio)
+        
+        # Scale factor from mm to pixels
+        scale_x = preview_width / width_mm
+        scale_y = preview_height / height_mm
+        
+        # Create image
+        image = QImage(preview_width, preview_height, QImage.Format.Format_ARGB32)
+        image.fill(QColor(43, 43, 43).rgb())  # Dark gray background
+        
+        # Draw points
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Faster without antialiasing
+        
+        # Use a brush for points - make sure they're visible
+        # Calculate point size based on scale - ensure minimum visibility
+        base_point_size = min(scale_x, scale_y)
+        # Point size should be at least 1 pixel per mm, but not too large
+        point_size = max(1, min(3, int(base_point_size * 0.5)))  # 0.5-3 pixels
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Use bright red for better visibility
+        painter.setBrush(QColor(255, 50, 50, 255))  # Bright red for burn marks
+        
+        # Draw all points
+        points_drawn = 0
+        for x, y in self._engraving_points:
+            # Convert to image coordinates
+            img_x = int((x - min_x) * scale_x)
+            img_y = int((max_y - y) * scale_y)  # Flip Y
+            
+            # Draw point if in bounds
+            if 0 <= img_x < preview_width and 0 <= img_y < preview_height:
+                painter.drawEllipse(img_x - point_size // 2, img_y - point_size // 2, 
+                                   point_size, point_size)
+                points_drawn += 1
+        
+        painter.end()
+        
+        # Convert to pixmap
+        self._preview_pixmap = QPixmap.fromImage(image)
+        print(f"Generated preview pixmap: {preview_width}x{preview_height}, drew {points_drawn:,} points (point_size={point_size})")
     
     def _fit_to_view(self):
         """Calculate scale and offset to fit engraving in view."""
@@ -119,13 +272,20 @@ class GCodePreviewWidget(QWidget):
         if max_x == min_x or max_y == min_y:
             return
         
+        # Ensure widget has valid size
+        widget_width = max(1, self.width())
+        widget_height = max(1, self.height())
+        
         width = max_x - min_x
         height = max_y - min_y
         
         # Calculate scale to fit with margin
         margin = 20
-        view_width = self.width() - 2 * margin
-        view_height = self.height() - 2 * margin
+        view_width = widget_width - 2 * margin
+        view_height = widget_height - 2 * margin
+        
+        if view_width <= 0 or view_height <= 0:
+            return
         
         scale_x = view_width / width if width > 0 else 1.0
         scale_y = view_height / height if height > 0 else 1.0
@@ -135,10 +295,13 @@ class GCodePreviewWidget(QWidget):
         center_x = (min_x + max_x) / 2
         center_y = (min_y + max_y) / 2
         
-        self._offset_x = self.width() / 2 - center_x * self._scale
-        # For Y: flip because screen Y increases downward, but laser Y increases upward
+        # Calculate offsets to center the content
+        # X: simple centering
+        self._offset_x = widget_width / 2 - center_x * self._scale
+        # Y: flip because screen Y increases downward, but laser Y increases upward
         # When we negate Y, we need to adjust the offset: offset = height/2 - (-center_y) * scale
-        self._offset_y = self.height() / 2 - (-center_y) * self._scale
+        # This simplifies to: offset = height/2 + center_y * scale
+        self._offset_y = widget_height / 2 + center_y * self._scale
     
     def paintEvent(self, event):
         """Paint the engraving preview."""
@@ -158,28 +321,47 @@ class GCodePreviewWidget(QWidget):
         # Draw grid (optional, for reference)
         self._draw_grid(painter)
         
-        # Draw engraving points
-        # Use a small dot for each point, or connect them for paths
-        painter.setPen(QPen(QColor(255, 100, 100), 1))  # Red for burn marks
-        painter.setBrush(QBrush(QColor(255, 100, 100, 180)))  # Semi-transparent red
-        
-        # Draw points - use small circles
-        point_size = max(1.0, self._scale * 0.1)  # Scale point size with zoom
-        
-        for x, y in self._engraving_points:
-            screen_x = x * self._scale + self._offset_x
-            # Flip Y: negate Y coordinate (screen Y increases downward, laser Y increases upward)
-            screen_y = -y * self._scale + self._offset_y
+        # Draw preview pixmap if available (much faster for all files)
+        if self._preview_pixmap and not self._preview_pixmap.isNull():
+            min_x, max_x, min_y, max_y = self._bounds
+            width_mm = max_x - min_x
+            height_mm = max_y - min_y
             
-            # Only draw if in viewport
-            if 0 <= screen_x <= self.width() and 0 <= screen_y <= self.height():
-                painter.drawEllipse(QPointF(screen_x, screen_y), point_size, point_size)
+            if width_mm > 0 and height_mm > 0:
+                # Calculate screen position - pixmap was generated with Y already flipped
+                screen_x = min_x * self._scale + self._offset_x
+                # For Y: pixmap has Y flipped (max_y at top), so we need to account for that
+                # The pixmap's coordinate system: top is max_y, bottom is min_y (flipped)
+                # Screen coordinate: we flip Y again, so -max_y is at top
+                screen_y = -max_y * self._scale + self._offset_y  # Flip Y for screen
+                screen_w = width_mm * self._scale
+                screen_h = height_mm * self._scale
+                
+                # Draw the pixmap
+                source_rect = QRectF(0, 0, self._preview_pixmap.width(), self._preview_pixmap.height())
+                target_rect = QRectF(screen_x, screen_y, screen_w, screen_h)
+                painter.drawPixmap(target_rect, self._preview_pixmap, source_rect)
+        else:
+            # Fallback: draw points individually (slower, for small files)
+            painter.setPen(QPen(QColor(255, 100, 100), 1))  # Red for burn marks
+            painter.setBrush(QBrush(QColor(255, 100, 100, 180)))  # Semi-transparent red
+            
+            point_size = max(1.0, self._scale * 0.1)  # Scale point size with zoom
+            
+            for x, y in self._engraving_points:
+                screen_x = x * self._scale + self._offset_x
+                screen_y = -y * self._scale + self._offset_y
+                
+                # Only draw if in viewport
+                if 0 <= screen_x <= self.width() and 0 <= screen_y <= self.height():
+                    painter.drawEllipse(QPointF(screen_x, screen_y), point_size, point_size)
         
         # Draw bounds rectangle (flip Y)
+        # Bounds are already calculated from points, so use them directly
         min_x, max_x, min_y, max_y = self._bounds
         rect_x = min_x * self._scale + self._offset_x
         # Flip Y: in laser coords, min_y is bottom, max_y is top
-        # After negating: -max_y is at bottom of screen, -min_y is at top
+        # After negating Y: -max_y is at top of screen, -min_y is at bottom
         # Qt draws from top, so use -max_y as the top Y position
         rect_y = -max_y * self._scale + self._offset_y
         rect_w = (max_x - min_x) * self._scale
@@ -266,9 +448,10 @@ class GCodePreviewWidget(QWidget):
     
     def resizeEvent(self, event):
         """Handle resize - refit to view."""
-        if self._bounds:
-            self._fit_to_view()
         super().resizeEvent(event)
+        if self._bounds and self.width() > 0 and self.height() > 0:
+            self._fit_to_view()
+            self.update()
 
 
 class GCodePreviewDialog(QWidget):

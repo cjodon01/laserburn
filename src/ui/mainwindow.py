@@ -984,8 +984,27 @@ class MainWindow(QMainWindow):
                 if hasattr(self.laser_panel, 'get_job_origin'):
                     settings.job_origin = self.laser_panel.get_job_origin()
                 
+                # Check cache first to avoid regenerating
+                cached_result = None
+                if hasattr(self.laser_panel, 'get_cached_gcode'):
+                    cached_result = self.laser_panel.get_cached_gcode(self.document, settings)
+                
+                # Create generator for save_to_file (needed regardless of cache)
                 generator = GCodeGenerator(settings)
-                gcode, warnings = generator.generate(self.document)
+                
+                if cached_result:
+                    print("Using cached G-code for export")
+                    gcode, warnings = cached_result
+                else:
+                    # Generate G-code
+                    gcode, warnings = generator.generate(self.document)
+                    
+                    # Cache it for future use
+                    if hasattr(self.laser_panel, '_cached_gcode') and hasattr(self.laser_panel, '_get_document_fingerprint'):
+                        self.laser_panel._cached_gcode = gcode
+                        self.laser_panel._cached_settings = settings
+                        self.laser_panel._cached_document_id = self.laser_panel._get_document_fingerprint(self.document)
+                        self.laser_panel._cached_warnings = warnings
                 
                 # Apply cylinder compensation if enabled
                 if (self.document.cylinder_params and 
@@ -1060,7 +1079,18 @@ class MainWindow(QMainWindow):
         # Get existing params if any
         initial_params = self.document.cylinder_params
         
-        dialog = CylinderDialog(self, initial_params)
+        # Get current document state for checkboxes
+        warp_image = getattr(self.document, 'cylinder_warp_image', False)
+        compensate_power = getattr(self.document, 'cylinder_compensate_power', False)
+        compensate_z = getattr(self.document, 'cylinder_compensate_z', False)
+        
+        dialog = CylinderDialog(
+            self, 
+            initial_params,
+            warp_image=warp_image,
+            compensate_power=compensate_power,
+            compensate_z=compensate_z
+        )
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
             params = dialog.get_params()

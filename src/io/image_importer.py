@@ -65,6 +65,19 @@ class ImageImporter:
         # Load image
         img = Image.open(filepath)
         
+        # Automatically downscale very large images to prevent excessive G-code size
+        # Maximum dimension: 2000px (good balance between quality and file size)
+        MAX_IMAGE_DIMENSION = 2000
+        original_width, original_height = img.size
+        if original_width > MAX_IMAGE_DIMENSION or original_height > MAX_IMAGE_DIMENSION:
+            # Calculate scale to fit within max dimension while maintaining aspect ratio
+            scale = min(MAX_IMAGE_DIMENSION / original_width, MAX_IMAGE_DIMENSION / original_height)
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
+            # Use high-quality resampling for downscaling
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            print(f"Downscaled image from {original_width}x{original_height} to {new_width}x{new_height} pixels")
+        
         # Preserve transparency instead of compositing onto white
         # Extract alpha channel if present
         alpha_channel = None

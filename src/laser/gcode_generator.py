@@ -544,13 +544,36 @@ class GCodeGenerator:
         # Now set the engraving feed rate
         self._emit(f"G1 F{speed:.0f} ; Set feed rate")
         
-        # Image scanlines are always done in relative mode internally
-        # If we're not already in relative mode, switch to it
-        # IMPORTANT: Store whether we switched modes so we can restore it later
+        # CRITICAL: Position to image start in ABSOLUTE mode FIRST (like LightBurn)
+        # LightBurn pattern: G90, G0 X...Y... (absolute), then G91 for scanlines
+        # This prevents coordinate drift from accumulating positioning errors
+        canvas_y_first = img_bottom_y - (0 * line_spacing_mm)  # First scanline Y position
+        canvas_x_start = img_top_left_x  # Start at left edge for forward scan
+        
+        # Convert to laser coordinates
+        laser_start = self._canvas_to_laser(Point(canvas_x_start, canvas_y_first), document_height, document_width)
+        
+        # Store current mode state
+        was_relative = self._use_relative_mode
         switched_to_relative = False
-        if not self._use_relative_mode:
-            self._emit("G91 ; Relative mode for image scanlines")
-            switched_to_relative = True
+        
+        # Switch to absolute mode for initial positioning (if not already)
+        if was_relative:
+            self._emit("G90 ; Absolute mode for initial positioning")
+            self._use_relative_mode = False
+        
+        # Position to start in absolute coordinates (like LightBurn line 9)
+        self._emit(f"G0 X{laser_start.x:.3f} Y{laser_start.y:.3f} ; Move to image start")
+        self._current_x = laser_start.x
+        self._current_y = laser_start.y
+        
+        # Store image start position for repositioning calculations
+        image_start_x = laser_start.x
+        
+        # NOW switch to relative mode for scanlines (like LightBurn line 11)
+        self._emit("G91 ; Relative mode for image scanlines")
+        self._use_relative_mode = True
+        switched_to_relative = True
         
         # Generate scanlines (bidirectional for efficiency)
         # Scanlines go from bottom to top in canvas coordinates
@@ -691,61 +714,35 @@ class GCodeGenerator:
                 laser_y = self._canvas_to_laser(Point(img_top_left_x, canvas_y), document_height, document_width).y
                 
                 # Calculate X position for start of this scanline
+                # Note: line_idx == 0 was already positioned before the loop in absolute mode
                 if line_idx == 0:
-                    # First scanline: move to start position
-                    # CRITICAL: Use absolute coordinates for the first move to ensure correct positioning
-                    # This prevents coordinate drift when images are enlarged
+                    # First scanline: we're already positioned, just verify we're at the right X
+                    # For forward scan, we should be at left edge (already positioned)
+                    # For reverse scan, we need to move to right edge
                     if reverse:
-                        # Start at right edge
-                        canvas_x_start = img_top_left_x + out_width_mm
-                    else:
-                        # Start at left edge
-                        canvas_x_start = img_top_left_x
-                    
-                    # Convert to laser coordinates
-                    laser_start = self._canvas_to_laser(Point(canvas_x_start, canvas_y), document_height, document_width)
-                    
-                    # If we're in relative mode, temporarily switch to absolute for the first move
-                    # This ensures the G-code starts at the correct absolute position
-                    if self._use_relative_mode:
-                        self._emit("G90 ; Temporary absolute mode for initial positioning")
-                        self._emit(f"G0 X{laser_start.x:.3f} Y{laser_start.y:.3f} ; Move to scanline start (image at {img_top_left_x:.2f}, {img_top_left_y:.2f})")
-                        self._emit("G91 ; Back to relative mode for scanlines")
-                    else:
-                        dx = laser_start.x - self._current_x
-                        dy = laser_start.y - self._current_y
-                        if abs(dx) > 0.0001 or abs(dy) > 0.0001:
-                            self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to scanline start (image at {img_top_left_x:.2f}, {img_top_left_y:.2f})")
-                    
-                    self._current_x = laser_start.x
-                    self._current_y = laser_start.y
+                        # Need to move to right edge in relative mode
+                        x_move = out_width_mm
+                        self._emit(f"G1 X{x_move:.3f} ; Move to reverse scanline start")
+                        self._current_x += x_move
                 else:
                     # Subsequent scanlines: need to move X to start and Y up
-                    prev_reverse = ((line_idx - 1) % 2 == 1)
-                    
+                    # Calculate where we should be for this scanline based on image start
                     if reverse:
-                        # This line is reverse: need to be at right end
-                        if prev_reverse:
-                            # Last line was also reverse: ended at left, move to right
-                            x_move = out_width_mm
-                        else:
-                            # Last line was forward: ended at right, already there
-                            x_move = 0
+                        # Reverse scan: need to be at right edge (X = image_start_x + width)
+                        target_x = image_start_x + out_width_mm
                     else:
-                        # This line is forward: need to be at left end
-                        if prev_reverse:
-                            # Last line was reverse: ended at left, already there
-                            x_move = 0
-                        else:
-                            # Last line was forward: ended at right, move back to left
-                            x_move = -out_width_mm
+                        # Forward scan: need to be at left edge (X = image_start_x)
+                        target_x = image_start_x
+                    
+                    # Calculate X movement needed (in relative mode)
+                    x_move = target_x - self._current_x
                     
                     # Move Y up and X to start position
                     if abs(x_move) > 0.001:
                         self._emit(f"G1 X{x_move:.3f} Y{line_spacing_mm:.3f} ; Move to next scanline")
+                        self._current_x += x_move
                     else:
                         self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
-                    self._current_x += x_move
                     self._current_y += line_spacing_mm
                 
                 # Generate scanline segments (all in relative mode)

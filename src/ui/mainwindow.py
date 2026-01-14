@@ -832,7 +832,7 @@ class MainWindow(QMainWindow):
             self,
             "Import File",
             "",
-            "Vector Files (*.svg *.dxf);;Images (*.png *.jpg *.bmp);;All Files (*)"
+            "All Files (*);;Vector Files (*.svg *.dxf);;Images (*.png *.jpg *.bmp *.jpeg *.gif *.webp)"
         )
         if filepath:
             self._import_file(filepath)
@@ -972,7 +972,15 @@ class MainWindow(QMainWindow):
                 from ..laser.gcode_generator import GCodeGenerator, GCodeSettings
                 from ..image.cylinder_warp import apply_cylinder_compensation_to_gcode
                 
-                generator = GCodeGenerator(GCodeSettings())
+                # Create settings with UI preferences
+                settings = GCodeSettings()
+                # Get start from and job origin settings from UI if available
+                if hasattr(self.laser_panel, 'get_start_from'):
+                    settings.start_from = self.laser_panel.get_start_from()
+                if hasattr(self.laser_panel, 'get_job_origin'):
+                    settings.job_origin = self.laser_panel.get_job_origin()
+                
+                generator = GCodeGenerator(settings)
                 gcode, warnings = generator.generate(self.document)
                 
                 # Apply cylinder compensation if enabled
@@ -1091,10 +1099,16 @@ class MainWindow(QMainWindow):
         dialog = ImageSettingsDialog(image_shape, self)
         
         # Connect settings changed signal to update canvas
-        dialog.settings_changed.connect(self.canvas._update_view)
+        def on_settings_changed():
+            # Explicitly refresh the image item when settings change
+            self.canvas.refresh_image_item(image_shape)
+        
+        dialog.settings_changed.connect(on_settings_changed)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            # Settings were applied in dialog
+            # Settings were applied in dialog - explicitly refresh the image item
+            self.canvas.refresh_image_item(image_shape)
+            # Also do a full view update to ensure everything is synced
             self.canvas._update_view()
             self.status_bar.showMessage(
                 f"Image settings updated: {image_shape.dither_mode} dithering, "
@@ -1329,6 +1343,13 @@ class MainWindow(QMainWindow):
             settings.work_area_x = x
             settings.work_area_y = y
             settings.work_area_z = z
+        
+        # Get start from and job origin settings from UI
+        if hasattr(self.laser_panel, 'get_start_from'):
+            settings.start_from = self.laser_panel.get_start_from()
+        if hasattr(self.laser_panel, 'get_job_origin'):
+            settings.job_origin = self.laser_panel.get_job_origin()
+        
         generator = GCodeGenerator(settings)
         gcode, warnings = generator.generate_frame(self.document)
         
@@ -1391,6 +1412,13 @@ class MainWindow(QMainWindow):
             settings.max_power = self._controller.get_max_spindle_speed()
         elif hasattr(self._controller, '_max_spindle_speed'):
             settings.max_power = self._controller._max_spindle_speed
+        
+        # CRITICAL: Get start_from and job_origin settings from UI
+        # These control where the job starts relative to the current laser position
+        if hasattr(self.laser_panel, 'get_start_from'):
+            settings.start_from = self.laser_panel.get_start_from()
+        if hasattr(self.laser_panel, 'get_job_origin'):
+            settings.job_origin = self.laser_panel.get_job_origin()
         
         # Validate work area before creating job
         generator = GCodeGenerator(settings)

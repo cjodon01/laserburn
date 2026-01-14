@@ -295,7 +295,9 @@ def shape_to_dict(shape: Shape) -> Dict[str, Any]:
             'threshold': shape.threshold,
             'dither_mode': shape.dither_mode,
             'brightness': getattr(shape, 'brightness', 0.0),
-            'contrast': getattr(shape, 'contrast', 1.0)
+            'contrast': getattr(shape, 'contrast', 1.0),
+            'skip_white': getattr(shape, 'skip_white', True),
+            'white_threshold': getattr(shape, 'white_threshold', 250)
         })
         # Encode image data as base64
         if shape.image_data is not None and HAS_NUMPY:
@@ -304,6 +306,13 @@ def shape_to_dict(shape: Shape) -> Dict[str, Any]:
             base_dict['image_data'] = base64.b64encode(image_bytes).decode('utf-8')
             base_dict['image_shape'] = list(shape.image_data.shape)
             base_dict['image_dtype'] = str(shape.image_data.dtype)
+        
+        # Encode alpha channel if present
+        if hasattr(shape, 'alpha_channel') and shape.alpha_channel is not None and HAS_NUMPY:
+            alpha_bytes = shape.alpha_channel.tobytes()
+            base_dict['alpha_channel'] = base64.b64encode(alpha_bytes).decode('utf-8')
+            base_dict['alpha_shape'] = list(shape.alpha_channel.shape)
+            base_dict['alpha_dtype'] = str(shape.alpha_channel.dtype)
     
     return base_dict
 
@@ -379,6 +388,8 @@ def dict_to_shape(shape_dict: Dict[str, Any]) -> Optional[Shape]:
         shape.dither_mode = shape_dict.get('dither_mode', 'floyd_steinberg')
         shape.brightness = shape_dict.get('brightness', 0.0)
         shape.contrast = shape_dict.get('contrast', 1.0)
+        shape.skip_white = shape_dict.get('skip_white', True)
+        shape.white_threshold = shape_dict.get('white_threshold', 250)
         
         # Decode image data from base64
         if 'image_data' in shape_dict and HAS_NUMPY:
@@ -391,6 +402,18 @@ def dict_to_shape(shape_dict: Dict[str, Any]) -> Optional[Shape]:
             except Exception as e:
                 print(f"Warning: Could not decode image data: {e}")
                 shape.image_data = None
+        
+        # Decode alpha channel from base64 if present
+        if 'alpha_channel' in shape_dict and HAS_NUMPY:
+            try:
+                alpha_bytes = base64.b64decode(shape_dict['alpha_channel'])
+                alpha_info = shape_dict.get('alpha_shape', [1, 1])
+                dtype_str = shape_dict.get('alpha_dtype', 'uint8')
+                dtype = np.dtype(dtype_str)
+                shape.alpha_channel = np.frombuffer(alpha_bytes, dtype=dtype).reshape(alpha_info)
+            except Exception as e:
+                print(f"Warning: Could not decode alpha channel: {e}")
+                shape.alpha_channel = None
     else:
         print(f"Warning: Unknown shape type: {shape_type}")
         return None

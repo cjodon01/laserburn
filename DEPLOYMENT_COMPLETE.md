@@ -34,6 +34,8 @@ The LaserBurn application has been successfully built, tested, and is ready for 
    - Complete G-code generator
    - GRBL-compatible output
    - Configurable settings
+   - **Optimized output**: Uses G1 S0 for white space (matching LightBurn) for better controller compatibility
+   - **Intelligent filtering**: Automatically skips tiny moves (< 0.05mm) to reduce file size
 
 ## 🧪 Testing Results
 

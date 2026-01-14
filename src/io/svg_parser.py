@@ -724,7 +724,7 @@ class SVGParser:
                 shape.radius_y *= scale_y
                 
         elif isinstance(shape, Path):
-            # Transform all path segments
+            # Transform all path segments to world coordinates
             for seg in shape.segments:
                 if isinstance(seg, MoveToSegment):
                     seg.point = self._transform_point(seg.point)
@@ -737,6 +737,43 @@ class SVGParser:
                 elif isinstance(seg, QuadraticBezierSegment):
                     seg.control_point = self._transform_point(seg.control_point)
                     seg.end_point = self._transform_point(seg.end_point)
+            
+            # Normalize path: calculate bounding box and offset segments to local coordinates
+            # This ensures position is applied correctly in get_paths()
+            if shape.segments:
+                # Calculate bounding box from transformed segments
+                all_points = []
+                for seg in shape.segments:
+                    if isinstance(seg, MoveToSegment):
+                        all_points.append(seg.point)
+                    elif isinstance(seg, LineToSegment):
+                        all_points.append(seg.point)
+                    elif isinstance(seg, CubicBezierSegment):
+                        all_points.extend([seg.cp1, seg.cp2, seg.end_point])
+                    elif isinstance(seg, QuadraticBezierSegment):
+                        all_points.extend([seg.control_point, seg.end_point])
+                
+                if all_points:
+                    min_x = min(p.x for p in all_points)
+                    min_y = min(p.y for p in all_points)
+                    
+                    # Set position to minimum point
+                    shape.position = Point(min_x, min_y)
+                    
+                    # Offset all segments by -position to put them in local coordinates
+                    offset = Point(-min_x, -min_y)
+                    for seg in shape.segments:
+                        if isinstance(seg, MoveToSegment):
+                            seg.point = Point(seg.point.x + offset.x, seg.point.y + offset.y)
+                        elif isinstance(seg, LineToSegment):
+                            seg.point = Point(seg.point.x + offset.x, seg.point.y + offset.y)
+                        elif isinstance(seg, CubicBezierSegment):
+                            seg.cp1 = Point(seg.cp1.x + offset.x, seg.cp1.y + offset.y)
+                            seg.cp2 = Point(seg.cp2.x + offset.x, seg.cp2.y + offset.y)
+                            seg.end_point = Point(seg.end_point.x + offset.x, seg.end_point.y + offset.y)
+                        elif isinstance(seg, QuadraticBezierSegment):
+                            seg.control_point = Point(seg.control_point.x + offset.x, seg.control_point.y + offset.y)
+                            seg.end_point = Point(seg.end_point.x + offset.x, seg.end_point.y + offset.y)
     
     def _transform_point(self, point: Point) -> Point:
         """Transform a point using the current transform matrix."""

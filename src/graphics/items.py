@@ -10,7 +10,21 @@ from PyQt6.QtCore import QRectF, QPointF, Qt
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath, QPainterPathStroker, QMouseEvent, QImage, QPixmap
 from typing import Optional
 
+import numpy as np
+
 from ..core.shapes import Shape, Point, ImageShape
+
+# Import dithering functions with fallback
+try:
+    from ..image.dithering import adjust_brightness_contrast
+    HAS_DITHERING = True
+except ImportError:
+    HAS_DITHERING = False
+    def adjust_brightness_contrast(image, brightness=0.0, contrast=1.0, alpha_channel=None):
+        """Fallback brightness/contrast adjustment."""
+        result = image.copy().astype(np.float32)
+        result = (result - 127.5) * contrast + 127.5 + brightness
+        return np.clip(result, 0, 255).astype(np.uint8)
 
 
 class ShapeGraphicsItem(QGraphicsPathItem):
@@ -22,6 +36,8 @@ class ShapeGraphicsItem(QGraphicsPathItem):
     - Handles selection visualization
     - Stores reference to the underlying Shape
     - Provides hover effects
+    
+    Position is handled via setPos() - paths are drawn in local coordinates.
     """
     
     def __init__(self, shape: Shape, pen: QPen, parent: Optional[QGraphicsItem] = None):
@@ -40,7 +56,7 @@ class ShapeGraphicsItem(QGraphicsPathItem):
         self._hover_pen = QPen(pen)
         self._hover_pen.setWidth(pen.width() + 1)
         
-        # Create the path from shape
+        # Create the path from shape (in local coordinates)
         self._update_path()
         
         # Make selectable and movable
@@ -53,12 +69,19 @@ class ShapeGraphicsItem(QGraphicsPathItem):
         
         # Store shape reference in item data
         self.setData(0, shape)
+        
+        # Set position from shape - this is the only positioning
+        self.setPos(shape.position.x, shape.position.y)
     
     def _update_path(self):
-        """Update the QPainterPath from the shape's paths."""
+        """Update the QPainterPath from the shape's paths in LOCAL coordinates."""
         paths = self._shape.get_paths()
         if not paths:
             return
+        
+        # Get shape position to convert to local coordinates
+        offset_x = self._shape.position.x
+        offset_y = self._shape.position.y
         
         painter_path = QPainterPath()
         
@@ -71,12 +94,12 @@ class ShapeGraphicsItem(QGraphicsPathItem):
                 continue
             
             # Each subpath must start with moveTo to create disconnected subpaths
-            # This ensures no connecting lines between subpaths
-            painter_path.moveTo(path_points[0].x, path_points[0].y)
+            # Convert from world coordinates to local coordinates by subtracting position
+            painter_path.moveTo(path_points[0].x - offset_x, path_points[0].y - offset_y)
             
             # Add line segments for this subpath
             for point in path_points[1:]:
-                painter_path.lineTo(point.x, point.y)
+                painter_path.lineTo(point.x - offset_x, point.y - offset_y)
         
         self.setPath(painter_path)
     
@@ -119,30 +142,14 @@ class ShapeGraphicsItem(QGraphicsPathItem):
         painter.drawPath(self.path())
     
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
-        """
-        Handle item changes (position, selection, etc.).
-        """
+        """Handle item changes (position, selection, etc.)."""
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # Update shape position when item is moved
-            # The paths include position already, so we need to:
-            # 1. Calculate delta from item's pos() movement
-            # 2. Add delta to shape.position
-            # 3. Rebuild path (which will include new position)
-            # 4. Reset item pos() to 0,0
+            # This is the simple approach - just sync shape.position to item.pos()
             if self._shape:
                 new_pos = self.pos()
-                if new_pos.x() != 0 or new_pos.y() != 0:
-                    print(f"[ShapeGraphicsItem] itemChange: Item moved, new_pos=({new_pos.x():.2f}, {new_pos.y():.2f})")
-                    print(f"  shape.position before=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
-                    # Add movement delta to shape position
-                    self._shape.position.x += new_pos.x()
-                    self._shape.position.y += new_pos.y()
-                    print(f"  shape.position after=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
-                    # Rebuild path with new position baked in
-                    self._update_path()
-                    # Reset item position (path now includes the position)
-                    self.setPos(0, 0)
-                    print(f"  Reset item pos to (0, 0)")
+                self._shape.position.x = new_pos.x()
+                self._shape.position.y = new_pos.y()
         
         return super().itemChange(change, value)
     
@@ -165,12 +172,9 @@ class ShapeGraphicsItem(QGraphicsPathItem):
     def update_from_shape(self):
         """Update the graphics item when the underlying shape changes."""
         if self._shape:
-            print(f"[ShapeGraphicsItem] update_from_shape: shape_id={self._shape.id}")
-            print(f"  shape.position=({self._shape.position.x:.2f}, {self._shape.position.y:.2f})")
-            print(f"  shape.scale=({self._shape.scale_x:.3f}, {self._shape.scale_y:.3f})")
-            if hasattr(self._shape, 'rotation'):
-                import math
-                print(f"  shape.rotation={math.degrees(self._shape.rotation):.2f}°")
+            # Update position
+            self.setPos(self._shape.position.x, self._shape.position.y)
+        # Update path (in local coordinates)
         self._update_path()
         self.update()
     
@@ -224,39 +228,132 @@ class ImageGraphicsItem(QGraphicsItem):
             self._pixmap = None
             return
         
-        import numpy as np
-        
         # Get image data
         img_data = self._shape.image_data.copy()
+        alpha_channel = getattr(self._shape, 'alpha_channel', None)
         
-        # Apply brightness/contrast adjustments for preview
+        # Apply brightness/contrast adjustments for preview (transparent pixels not adjusted)
         brightness = getattr(self._shape, 'brightness', 0.0)
         contrast = getattr(self._shape, 'contrast', 1.0)
         
         if brightness != 0 or contrast != 1.0:
-            # Apply brightness and contrast
-            img_float = img_data.astype(np.float32)
-            img_float = (img_float - 127.5) * contrast + 127.5
-            img_float += brightness
-            img_data = np.clip(img_float, 0, 255).astype(np.uint8)
+            img_data = adjust_brightness_contrast(img_data, brightness, contrast, alpha_channel)
         
-        # Apply invert if enabled
+        # Apply invert if enabled (transparent pixels not inverted)
         if getattr(self._shape, 'invert', False):
-            img_data = 255 - img_data
+            if alpha_channel is not None:
+                mask = alpha_channel >= 255
+                img_data[mask] = 255 - img_data[mask]
+            else:
+                img_data = 255 - img_data
         
+        # Apply dithering for canvas preview (at lower resolution for performance)
+        # This matches what the user sees in the dialog preview
+        dither_mode = getattr(self._shape, 'dither_mode', 'floyd_steinberg')
+        threshold = getattr(self._shape, 'threshold', 128)
+        
+        # Downscale for dithering preview (max 512px width) to keep it fast
+        max_preview_width = 512
+        height, width = img_data.shape
+        preview_scale = 1.0
+        preview_img = img_data
+        preview_alpha = alpha_channel
+        
+        if width > max_preview_width:
+            preview_scale = max_preview_width / width
+            new_width = max_preview_width
+            new_height = int(height * preview_scale)
+            
+            # Downscale image and alpha for dithering
+            try:
+                from PIL import Image
+                pil_img = Image.fromarray(img_data, mode='L')
+                pil_img = pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                preview_img = np.array(pil_img, dtype=np.uint8)
+                
+                if alpha_channel is not None:
+                    pil_alpha = Image.fromarray(alpha_channel, mode='L')
+                    pil_alpha = pil_alpha.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    preview_alpha = np.array(pil_alpha, dtype=np.uint8)
+            except ImportError:
+                # Fallback: use original image (no downscaling)
+                preview_img = img_data
+                preview_alpha = alpha_channel
+        
+        # Apply dithering to preview image
+        try:
+            from ..image.dithering import DitheringMethod, ImageDitherer
+            # Map dither mode string to enum
+            mode_map = {
+                "none": DitheringMethod.NONE,
+                "floyd_steinberg": DitheringMethod.FLOYD_STEINBERG,
+                "jarvis": DitheringMethod.JARVIS_JUDICE_NINKE,
+                "jarvis_judice_ninke": DitheringMethod.JARVIS_JUDICE_NINKE,
+                "stucki": DitheringMethod.STUCKI,
+                "atkinson": DitheringMethod.ATKINSON,
+                "bayer_2x2": DitheringMethod.BAYER_2x2,
+                "bayer_4x4": DitheringMethod.BAYER_4x4,
+                "bayer_8x8": DitheringMethod.BAYER_8x8,
+            }
+            method = mode_map.get(dither_mode, DitheringMethod.FLOYD_STEINBERG)
+            ditherer = ImageDitherer(method)
+            preview_img = ditherer.dither(preview_img, threshold, preview_alpha)
+            
+            # Upscale back to original size if we downscaled
+            if preview_scale < 1.0:
+                try:
+                    from PIL import Image
+                    pil_dithered = Image.fromarray(preview_img, mode='L')
+                    pil_dithered = pil_dithered.resize((width, height), Image.Resampling.NEAREST)
+                    img_data = np.array(pil_dithered, dtype=np.uint8)
+                except ImportError:
+                    # Fallback: use original image without dithering (can't upscale without PIL)
+                    # This means we show the non-dithered version, but at least it matches dimensions
+                    pass
+            else:
+                # No downscaling was done, use dithered result directly
+                img_data = preview_img
+        except ImportError:
+            # Dithering module not available - skip dithering, use original img_data
+            pass
+        
+        # Ensure we have the correct dimensions
         height, width = img_data.shape
         
-        # Convert grayscale to RGB for QImage
-        rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
-        
-        # Create QImage from numpy array
-        bytes_per_line = 3 * width
-        qimage = QImage(
-            rgb_data.tobytes(),
-            width, height,
-            bytes_per_line,
-            QImage.Format.Format_RGB888
-        )
+        # Create RGBA image to show transparency properly
+        if alpha_channel is not None:
+            # Create checkerboard pattern for transparent areas (like LightBurn)
+            checkerboard = self._create_checkerboard(width, height, 8)
+            
+            # Composite image onto checkerboard for transparent areas
+            rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
+            alpha_3d = alpha_channel[:, :, np.newaxis] / 255.0
+            
+            # Blend: transparent areas show checkerboard, opaque areas show image
+            composite = (rgb_data * alpha_3d + checkerboard * (1 - alpha_3d)).astype(np.uint8)
+            
+            # Create RGBA image
+            rgba_data = np.zeros((height, width, 4), dtype=np.uint8)
+            rgba_data[:, :, :3] = composite
+            rgba_data[:, :, 3] = 255  # Full opacity for display
+            
+            bytes_per_line = 4 * width
+            qimage = QImage(
+                rgba_data.tobytes(),
+                width, height,
+                bytes_per_line,
+                QImage.Format.Format_RGBA8888
+            )
+        else:
+            # No transparency - convert grayscale to RGB
+            rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
+            bytes_per_line = 3 * width
+            qimage = QImage(
+                rgb_data.tobytes(),
+                width, height,
+                bytes_per_line,
+                QImage.Format.Format_RGB888
+            )
         
         # Scale to display size (3 pixels per mm for display)
         scaled_image = qimage.scaled(
@@ -267,6 +364,23 @@ class ImageGraphicsItem(QGraphicsItem):
         )
         
         self._pixmap = QPixmap.fromImage(scaled_image)
+    
+    def _create_checkerboard(self, width: int, height: int, tile_size: int = 8) -> np.ndarray:
+        """Create a checkerboard pattern for transparent areas (vectorized for speed)."""
+        # Create coordinate arrays
+        y_coords = np.arange(height) // tile_size
+        x_coords = np.arange(width) // tile_size
+        
+        # Create meshgrid and checkerboard mask
+        yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+        mask = (xx + yy) % 2 == 0
+        
+        # Create pattern using broadcasting (fast)
+        pattern = np.zeros((height, width, 3), dtype=np.uint8)
+        pattern[mask] = [240, 240, 240]  # Light gray
+        pattern[~mask] = [200, 200, 200]  # Darker gray
+        
+        return pattern
     
     def refresh(self):
         """Refresh the pixmap to reflect setting changes."""

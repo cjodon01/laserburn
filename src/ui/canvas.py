@@ -1084,6 +1084,28 @@ class LaserCanvas(QGraphicsView):
         
         return selected_shapes
     
+    def refresh_image_item(self, image_shape: ImageShape):
+        """Refresh a specific ImageGraphicsItem when its shape properties change."""
+        # Find the ImageGraphicsItem for this shape
+        found = False
+        for item in self.scene.items():
+            if isinstance(item, ImageGraphicsItem):
+                # Check both shape_ref and data(0) to find the item
+                shape = item.shape_ref if hasattr(item, 'shape_ref') else item.data(0)
+                if shape and hasattr(shape, 'id') and shape.id == image_shape.id:
+                    # Found it - refresh it
+                    item.update_from_shape()
+                    found = True
+                    break
+        
+        # Always do a full view update to ensure everything is synced
+        # This handles cases where the item wasn't found or needs recreation
+        self._update_view()
+        
+        # Force scene and viewport update to ensure repaint
+        self.scene.update()
+        self.viewport().update()
+    
     def _on_text_editing_finished(self, text: str, position: QPointF):
         """Handle text editing finished - convert to Text shape."""
         from ..graphics.text_item import EditableTextItem

@@ -6,13 +6,14 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox,
     QProgressBar, QListWidget, QListWidgetItem, QMessageBox,
-    QTabWidget, QGridLayout, QScrollArea
+    QTabWidget, QGridLayout, QScrollArea, QComboBox, QButtonGroup
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QKeySequence
 
 from ...laser.controller import ConnectionState, JobState
 from ...laser.job_manager import JobPriority
+from ...laser.gcode_generator import StartFrom, JobOrigin
 from ..widgets.console_widget import ConsoleWidget
 
 
@@ -257,6 +258,73 @@ class LaserPanel(QWidget):
         
         job_group.setLayout(job_layout)
         layout.addWidget(job_group)
+        
+        # Job Start Settings
+        start_group = QGroupBox("Job Start Settings")
+        start_layout = QVBoxLayout()
+        
+        # Start From dropdown
+        start_from_layout = QFormLayout()
+        self.start_from_combo = QComboBox()
+        self.start_from_combo.addItem("Home", StartFrom.HOME)
+        self.start_from_combo.addItem("Current Position", StartFrom.CURRENT_POSITION)
+        self.start_from_combo.setCurrentIndex(0)  # Default to Home
+        self.start_from_combo.setToolTip(
+            "Home: Start from machine home (0,0,0) - uses absolute coordinates\n"
+            "Current Position: Start from wherever laser currently is - uses relative coordinates"
+        )
+        start_from_layout.addRow("Start From:", self.start_from_combo)
+        start_layout.addLayout(start_from_layout)
+        
+        # Job Origin grid (3x3)
+        origin_label = QLabel("Job Origin:")
+        start_layout.addWidget(origin_label)
+        
+        # Create 3x3 grid of radio buttons
+        origin_grid = QGridLayout()
+        origin_grid.setSpacing(3)
+        self.job_origin_group = QButtonGroup()
+        
+        # Job origin positions (top to bottom, left to right)
+        origins = [
+            (JobOrigin.TOP_LEFT, 0, 0), (JobOrigin.TOP_CENTER, 0, 1), (JobOrigin.TOP_RIGHT, 0, 2),
+            (JobOrigin.MIDDLE_LEFT, 1, 0), (JobOrigin.CENTER, 1, 1), (JobOrigin.MIDDLE_RIGHT, 1, 2),
+            (JobOrigin.BOTTOM_LEFT, 2, 0), (JobOrigin.BOTTOM_CENTER, 2, 1), (JobOrigin.BOTTOM_RIGHT, 2, 2)
+        ]
+        
+        for job_origin, row, col in origins:
+            btn = QPushButton()
+            btn.setCheckable(True)
+            btn.setFixedSize(35, 35)
+            # Set style to show checked state
+            btn.setStyleSheet("""
+                QPushButton {
+                    border: 2px solid #666;
+                    border-radius: 3px;
+                    background-color: #444;
+                }
+                QPushButton:checked {
+                    background-color: #0066cc;
+                    border: 2px solid #0088ff;
+                }
+                QPushButton:hover {
+                    border: 2px solid #888;
+                }
+            """)
+            tooltip_text = job_origin.value.replace("-", " ").title()
+            btn.setToolTip(tooltip_text)
+            self.job_origin_group.addButton(btn, list(JobOrigin).index(job_origin))
+            origin_grid.addWidget(btn, row, col)
+            
+            # Set center as default
+            if job_origin == JobOrigin.CENTER:
+                btn.setChecked(True)
+        
+        start_layout.addLayout(origin_grid)
+        start_layout.addWidget(QLabel("Select which point of the design\ncorresponds to the start position"))
+        
+        start_group.setLayout(start_layout)
+        layout.addWidget(start_group)
         
         # Job queue
         queue_group = QGroupBox("Job Queue")
@@ -593,6 +661,17 @@ class LaserPanel(QWidget):
         """Set the max spindle speed in the UI."""
         self.max_spindle_spin.setValue(value)
         self._update_spindle_info(value)
+    
+    def get_start_from(self) -> StartFrom:
+        """Get the selected start from option."""
+        return self.start_from_combo.currentData()
+    
+    def get_job_origin(self) -> JobOrigin:
+        """Get the selected job origin."""
+        checked_id = self.job_origin_group.checkedId()
+        if checked_id >= 0:
+            return list(JobOrigin)[checked_id]
+        return JobOrigin.CENTER  # Default
     
     def _on_detect_workarea(self):
         """Auto-detect work area from GRBL settings."""

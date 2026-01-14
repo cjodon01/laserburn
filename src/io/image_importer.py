@@ -65,21 +65,32 @@ class ImageImporter:
         # Load image
         img = Image.open(filepath)
         
-        # Handle transparency by compositing onto white background
-        # This ensures transparent areas = white = no engraving (like LightBurn)
-        if img.mode in ('RGBA', 'LA', 'PA'):
-            # Create white background
-            background = Image.new('RGBA', img.size, (255, 255, 255, 255))
-            # Composite image onto white background
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            img = Image.alpha_composite(background, img)
+        # Preserve transparency instead of compositing onto white
+        # Extract alpha channel if present
+        alpha_channel = None
+        has_transparency = False
+        
+        if img.mode in ('RGBA', 'LA'):
+            # Extract alpha channel before converting
+            if img.mode == 'RGBA':
+                alpha_channel = np.array(img.split()[3], dtype=np.uint8)  # Get alpha channel
+                has_transparency = np.any(alpha_channel < 255)  # Check if any pixels are transparent
+            elif img.mode == 'LA':
+                alpha_channel = np.array(img.split()[1], dtype=np.uint8)  # Get alpha channel
+                has_transparency = np.any(alpha_channel < 255)
+            # Convert to RGB first, then to grayscale (preserving alpha separately)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            else:
+                img = img.convert('L')
         elif img.mode == 'P':
             # Palette mode - check for transparency
             if 'transparency' in img.info:
-                img = img.convert('RGBA')
-                background = Image.new('RGBA', img.size, (255, 255, 255, 255))
-                img = Image.alpha_composite(background, img)
+                # Convert to RGBA to get alpha channel
+                img_rgba = img.convert('RGBA')
+                alpha_channel = np.array(img_rgba.split()[3], dtype=np.uint8)
+                has_transparency = np.any(alpha_channel < 255)
+                img = img_rgba.convert('RGB')
         
         # Convert to grayscale
         if img.mode != 'L':
@@ -87,6 +98,9 @@ class ImageImporter:
         
         # Convert to numpy array
         image_data = np.array(img, dtype=np.uint8)
+        
+        # If we have transparency, store alpha channel
+        # Transparent pixels will be skipped during processing and engraving
         
         # Invert if requested (for images where black should be engraved)
         if self.invert:
@@ -126,6 +140,7 @@ class ImageImporter:
         )
         shape.dpi = self.dpi
         shape.invert = self.invert
+        shape.alpha_channel = alpha_channel if has_transparency else None
         
         # Set layer settings for image engraving
         layer.laser_settings.operation = "image"

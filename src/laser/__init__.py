@@ -17,7 +17,7 @@ from .job_manager import JobManager, LaserJob, JobPriority
 
 __all__ = [
     # G-code generation
-    'GCodeGenerator', 'GCodeSettings', 'LaserMode',
+    'GCodeGenerator', 'GCodeSettings', 'LaserMode', 'StartFrom', 'JobOrigin',
     # Path optimization
     'optimize_paths', 'optimize_closed_path_start',
     'calculate_total_distance', 'estimate_job_time', 'OptimizedPath',

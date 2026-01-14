@@ -4,6 +4,13 @@
 
 LaserBurn is now ready for use! This is the first functional release with core features implemented.
 
+## 🔄 Recent Updates (2026-01-13)
+
+### G-Code Optimization Improvements
+- **Better Controller Compatibility**: Changed white space handling from G0 (rapid moves) to G1 S0 (feed rate with laser off) to match LightBurn's approach, ensuring better compatibility with various GRBL controllers
+- **Reduced File Size**: Added intelligent move filtering that automatically skips very small moves (< 0.05mm), significantly reducing G-code file size without noticeable quality impact
+- **Improved Efficiency**: Very small runs are now automatically filtered out, resulting in faster processing and smaller file sizes
+
 ## ✅ What's Working
 
 ### Core Features
@@ -71,6 +78,8 @@ LaserBurn is now ready for use! This is the first functional release with core f
 - GRBL 1.1+ compatible
 - Standard G-code commands (G0, G1, M3, M4, M5)
 - Configurable power and speed settings
+- **Optimized output**: Uses G1 S0 for white space (matching LightBurn) for better controller compatibility
+- **Intelligent filtering**: Automatically skips tiny moves (< 0.05mm) to reduce file size
 
 ### System Requirements
 - Python 3.10 or higher

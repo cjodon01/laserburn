@@ -28,6 +28,25 @@ class LaserMode(Enum):
     DYNAMIC = "M4"   # Dynamic power (scales with speed - can cause inconsistent power)
 
 
+class StartFrom(Enum):
+    """Where to start the job from."""
+    HOME = "home"              # Start from machine home (0,0,0) - absolute coordinates
+    CURRENT_POSITION = "current"  # Start from current position - relative coordinates
+
+
+class JobOrigin(Enum):
+    """Which point of the design corresponds to the start point."""
+    TOP_LEFT = "top-left"
+    TOP_CENTER = "top-center"
+    TOP_RIGHT = "top-right"
+    MIDDLE_LEFT = "middle-left"
+    CENTER = "center"
+    MIDDLE_RIGHT = "middle-right"
+    BOTTOM_LEFT = "bottom-left"
+    BOTTOM_CENTER = "bottom-center"
+    BOTTOM_RIGHT = "bottom-right"
+
+
 @dataclass
 class GCodeSettings:
     """Settings for G-code generation."""
@@ -45,9 +64,13 @@ class GCodeSettings:
     default_cut_speed: float = 1000.0  # mm/min for G1 moves
     
     # Machine settings
-    origin: str = "bottom-left"      # Origin position
+    origin: str = "bottom-left"      # Origin position (deprecated - use job_origin)
     home_on_start: bool = False      # Home machine at start
     return_to_origin: bool = True    # Return to origin at end
+    
+    # Start point and origin settings
+    start_from: StartFrom = StartFrom.HOME  # Where to start the job from
+    job_origin: JobOrigin = JobOrigin.CENTER  # Which point of design corresponds to start point
     
     # Machine work area limits (in mm)
     # These define the physical limits of the laser bed
@@ -142,6 +165,9 @@ class GCodeGenerator:
         self._current_document_height = document.height
         self._current_document_width = document.width
         
+        # Calculate job origin offset (which point of design should be at start position)
+        self._job_origin_offset_x, self._job_origin_offset_y = self._calculate_job_origin_offset(document)
+        
         # Header
         self._add_header(document)
         
@@ -166,32 +192,124 @@ class GCodeGenerator:
         self._laser_on = False
         self._current_power = 0
         self._current_speed = 0.0
+        self._job_origin_offset_x = 0.0
+        self._job_origin_offset_y = 0.0
+        self._use_relative_mode = False  # Set in _add_header based on start_from mode
+    
+    def _calculate_job_origin_offset(self, document: Document) -> tuple[float, float]:
+        """
+        Calculate offset based on job_origin setting.
+        
+        Returns:
+            (offset_x, offset_y) - offset to apply IN LASER COORDINATES so the selected 
+            job origin point is at (0,0) in laser space.
+            
+        Note: These offsets are applied AFTER the canvas-to-laser coordinate transformation.
+        Note: For HOME mode, no offset is applied - design stays at document position.
+        """
+        # For HOME mode, don't apply any offset
+        # Design should be at its actual document position
+        if self.settings.start_from == StartFrom.HOME:
+            return 0.0, 0.0
+        
+        # Get design bounds
+        bounds = document.get_design_bounds()
+        if not bounds or (bounds.max_x == bounds.min_x and bounds.max_y == bounds.min_y):
+            # Empty or single point design
+            return 0.0, 0.0
+        
+        design_width = bounds.max_x - bounds.min_x
+        design_height = bounds.max_y - bounds.min_y
+        
+        # First, find the canvas coordinates of the selected job origin point
+        # Canvas coordinates: origin is top-left, X increases right, Y increases down
+        if self.settings.job_origin == JobOrigin.TOP_LEFT:
+            canvas_x = bounds.min_x
+            canvas_y = bounds.min_y
+        elif self.settings.job_origin == JobOrigin.TOP_CENTER:
+            canvas_x = bounds.min_x + design_width / 2.0
+            canvas_y = bounds.min_y
+        elif self.settings.job_origin == JobOrigin.TOP_RIGHT:
+            canvas_x = bounds.max_x
+            canvas_y = bounds.min_y
+        elif self.settings.job_origin == JobOrigin.MIDDLE_LEFT:
+            canvas_x = bounds.min_x
+            canvas_y = bounds.min_y + design_height / 2.0
+        elif self.settings.job_origin == JobOrigin.CENTER:
+            canvas_x = bounds.min_x + design_width / 2.0
+            canvas_y = bounds.min_y + design_height / 2.0
+        elif self.settings.job_origin == JobOrigin.MIDDLE_RIGHT:
+            canvas_x = bounds.max_x
+            canvas_y = bounds.min_y + design_height / 2.0
+        elif self.settings.job_origin == JobOrigin.BOTTOM_LEFT:
+            canvas_x = bounds.min_x
+            canvas_y = bounds.max_y
+        elif self.settings.job_origin == JobOrigin.BOTTOM_CENTER:
+            canvas_x = bounds.min_x + design_width / 2.0
+            canvas_y = bounds.max_y
+        elif self.settings.job_origin == JobOrigin.BOTTOM_RIGHT:
+            canvas_x = bounds.max_x
+            canvas_y = bounds.max_y
+        else:
+            # Default to center
+            canvas_x = bounds.min_x + design_width / 2.0
+            canvas_y = bounds.min_y + design_height / 2.0
+        
+        # Now transform this point to laser coordinates (Y-flip)
+        # Laser coordinates: origin is bottom-left, X increases right, Y increases up
+        # laser_x = canvas_x
+        # laser_y = document_height - canvas_y
+        laser_x = canvas_x
+        laser_y = document.height - canvas_y
+        
+        # The offset is the NEGATIVE of this position (to move it to origin)
+        # This offset will be applied AFTER the Y-flip in _canvas_to_laser
+        return -laser_x, -laser_y
     
     def _add_header(self, document: Document):
         """Add G-code header/preamble."""
         self._emit("; LaserBurn G-Code Output")
         self._emit(f"; Document: {document.name}")
         self._emit(f"; Size: {document.width}mm x {document.height}mm")
+        self._emit(f"; Start From: {self.settings.start_from.value}")
+        self._emit(f"; Job Origin: {self.settings.job_origin.value}")
+        
+        # Get design bounds for header info
+        bounds = document.get_design_bounds()
+        if bounds:
+            # Calculate actual transformed bounds (in laser coordinates with offset applied)
+            # Bottom-left in canvas: (min_x, max_y), top-right in canvas: (max_x, min_y)
+            # Transform to laser coords then apply offset
+            bl_laser_x = bounds.min_x + self._job_origin_offset_x
+            bl_laser_y = (document.height - bounds.max_y) + self._job_origin_offset_y
+            tr_laser_x = bounds.max_x + self._job_origin_offset_x
+            tr_laser_y = (document.height - bounds.min_y) + self._job_origin_offset_y
+            self._emit(f"; Bounds: X{bl_laser_x:.2f} Y{bl_laser_y:.2f} to X{tr_laser_x:.2f} Y{tr_laser_y:.2f}")
         self._emit("")
         
-        # Units
-        if self.settings.use_mm:
-            self._emit("G21 ; Set units to mm")
+        # Standard G-code setup (like LightBurn: G00 G17 G40 G21 G54)
+        self._emit("G00 G17 G40 G21 G54")
+        
+        # For User Origin and Current Position, use RELATIVE mode (G91)
+        # This is how LightBurn handles these modes - all coordinates are relative
+        # to the current position, which is at the selected job origin point
+        if self.settings.start_from == StartFrom.CURRENT_POSITION:
+            self._emit("G91 ; Relative positioning (current position/user origin mode)")
+            self._use_relative_mode = True
         else:
-            self._emit("G20 ; Set units to inches")
+            # Home mode uses absolute coordinates
+            if self.settings.absolute_coords:
+                self._emit("G90 ; Absolute positioning")
+            else:
+                self._emit("G91 ; Relative positioning")
+            self._use_relative_mode = not self.settings.absolute_coords
+            
+            # Home if requested
+            if self.settings.home_on_start:
+                self._emit("$H ; Home machine")
         
-        # Positioning mode
-        if self.settings.absolute_coords:
-            self._emit("G90 ; Absolute positioning")
-        else:
-            self._emit("G91 ; Relative positioning")
-        
-        # Home if requested
-        if self.settings.home_on_start:
-            self._emit("$H ; Home machine")
-        
-        # Laser off to start
-        self._emit("M5 ; Laser off")
+        # Laser mode and rapid speed
+        self._emit(f"{self.settings.laser_mode.value} ; Laser mode")
         self._emit(f"G0 F{self.settings.rapid_speed} ; Set rapid speed")
         self._emit("")
     
@@ -202,7 +320,15 @@ class GCodeGenerator:
         self._laser_off()
         
         if self.settings.return_to_origin:
-            self._emit("G0 X0 Y0 ; Return to origin")
+            if self._use_relative_mode:
+                # In relative mode, return to origin means moving back to (0,0)
+                # which is our starting point (job origin)
+                dx = -self._current_x
+                dy = -self._current_y
+                if abs(dx) > 0.0001 or abs(dy) > 0.0001:
+                    self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Return to origin")
+            else:
+                self._emit("G0 X0 Y0 ; Return to origin")
         
         self._emit("M5 ; Ensure laser off")
         self._emit("M2 ; End program")
@@ -340,17 +466,28 @@ class GCodeGenerator:
         power = int((settings.power / 100.0) * self.settings.max_power)
         speed = settings.speed * 60  # Convert mm/s to mm/min
         
+        # Get alpha channel for transparency handling
+        alpha_channel = getattr(image_shape, 'alpha_channel', None)
+        
         # Apply brightness/contrast adjustments before dithering
+        # Transparent pixels are not adjusted (preserved as-is)
         if HAS_DITHERING:
             brightness = getattr(image_shape, 'brightness', 0.0)
             contrast = getattr(image_shape, 'contrast', 1.0)
             
             if brightness != 0 or contrast != 1.0:
-                img = adjust_brightness_contrast(img, brightness, contrast)
+                img = adjust_brightness_contrast(img, brightness, contrast, alpha_channel)
         
         # Apply invert if enabled
+        # Transparent pixels are not inverted (they remain transparent)
         if getattr(image_shape, 'invert', False):
-            img = 255 - img
+            if alpha_channel is not None:
+                # Only invert non-transparent pixels
+                mask = alpha_channel >= 255
+                img[mask] = 255 - img[mask]
+            else:
+                # No transparency - invert all pixels
+                img = 255 - img
         
         # Apply dithering to convert grayscale to binary
         if HAS_DITHERING:
@@ -375,7 +512,7 @@ class GCodeGenerator:
                 method = DitheringMethod.FLOYD_STEINBERG
             
             ditherer = ImageDitherer(method)
-            binary_img = ditherer.dither(img, image_shape.threshold)
+            binary_img = ditherer.dither(img, image_shape.threshold, alpha_channel)
         else:
             # Simple threshold if dithering not available
             binary_img = np.where(img >= image_shape.threshold, 255, 0).astype(np.uint8)
@@ -385,36 +522,39 @@ class GCodeGenerator:
         document_height = getattr(self, '_current_document_height', 400.0)  # Default fallback
         document_width = getattr(self, '_current_document_width', 400.0)  # Default fallback
         
-        # Get the image's bounding box to find the bottom-left corner
-        # This matches what the frame operation uses
-        bbox = image_shape.get_bounding_box()
-        canvas_bottom_left = Point(bbox.min_x, bbox.max_y)  # Bottom-left in canvas coordinates
-        laser_bottom_left = self._canvas_to_laser(canvas_bottom_left, document_height, document_width)
+        # Check if image is rotated (if so, we need to transform scanlines)
+        has_rotation = abs(image_shape.rotation) > 0.001  # More than ~0.06 degrees
         
-        # Start position for scanlines (bottom-left in laser coordinates)
-        start_x = laser_bottom_left.x
-        start_y = laser_bottom_left.y
+        # Calculate pixel-to-mm conversion
+        px_to_mm = out_width_mm / img_width
+        
+        # Get image position in canvas coordinates
+        # ImageShape.position is the top-left corner in canvas coordinates
+        # Canvas: origin at top-left, Y increases downward
+        img_top_left_x = image_shape.position.x
+        img_top_left_y = image_shape.position.y
+        img_bottom_y = img_top_left_y + out_height_mm  # Bottom edge in canvas coords
         
         # Use M4 (dynamic power mode) for image engraving (like LightBurn)
         self._emit("M4 ; Dynamic power mode for image engraving")
+        
+        # Now set the engraving feed rate
         self._emit(f"G1 F{speed:.0f} ; Set feed rate")
         
-        # Move to start position in absolute mode
-        self._emit(f"G0 X{start_x:.3f} Y{start_y:.3f} ; Move to image start")
-        
-        # Switch to relative mode for entire image (like LightBurn)
-        self._emit("G91 ; Relative mode for image scanlines")
+        # Image scanlines are always done in relative mode internally
+        # If we're not already in relative mode, switch to it
+        if not self._use_relative_mode:
+            self._emit("G91 ; Relative mode for image scanlines")
         
         # Generate scanlines (bidirectional for efficiency)
-        # Scanlines go from bottom to top in laser coordinates
+        # Scanlines go from bottom to top in canvas coordinates
         for line_idx in range(num_lines):
-            # Y position for this scanline (in laser coordinates)
+            # Canvas Y position for this scanline
             # Start from bottom and work upward
-            y_mm = start_y + (line_idx * line_spacing_mm)
+            canvas_y = img_bottom_y - (line_idx * line_spacing_mm)
             
             # Calculate which row of image pixels to sample
-            # Since we're engraving from bottom to top in laser space, but image rows
-            # are stored top to bottom, we need to reverse the row index
+            # Image rows are stored top to bottom, but we're scanning bottom to top
             img_row = int(((num_lines - 1 - line_idx) / num_lines) * img_height)
             if img_row >= img_height:
                 img_row = img_height - 1
@@ -424,31 +564,18 @@ class GCodeGenerator:
             # Get pixel row
             row_data = binary_img[img_row]
             
-            # Calculate pixel-to-mm conversion
-            px_to_mm = out_width_mm / img_width
-            
             # Determine scan direction (bidirectional)
             reverse = (line_idx % 2 == 1)
             
             # Build runs of consecutive pixels with same state
             # A run is (start_px, end_px, is_on) where is_on means engrave
-            # 
-            # IMPORTANT: Forward and reverse scans must cover exactly the same distance
-            # to prevent cumulative drift (which causes diagonal/rhombus distortion).
-            # Forward: starts at 0, ends at img_width
-            # Reverse: starts at img_width, ends at 0
             runs = []
             in_run = False
+            run_start = 0
             current_state = False
             
-            # Set initial run_start position based on direction
-            # This ensures forward and reverse scans cover identical distances
-            if reverse:
-                run_start = img_width  # Start at right edge for reverse
-                pixel_range = range(img_width - 1, -1, -1)  # Process pixels right to left
-            else:
-                run_start = 0  # Start at left edge for forward
-                pixel_range = range(img_width)  # Process pixels left to right
+            # Iterate through pixels in scan direction
+            pixel_range = range(img_width - 1, -1, -1) if reverse else range(img_width)
             
             for px in pixel_range:
                 pixel_on = row_data[px] == 0  # 0 = black = engrave
@@ -456,19 +583,19 @@ class GCodeGenerator:
                 if pixel_on != current_state:
                     # State changed
                     if in_run:
-                        # Close previous run at current pixel position
+                        # Close previous run
                         runs.append((run_start, px, current_state))
-                    # Start new run from current pixel
+                    # Start new run
                     run_start = px
                     current_state = pixel_on
                     in_run = True
                 elif not in_run:
-                    # Start first run - but keep run_start at the edge (0 or img_width)
-                    # so the initial segment covers from edge to first pixel
+                    # Start first run
+                    run_start = px
                     current_state = pixel_on
                     in_run = True
             
-            # Close final run at the opposite edge
+            # Close final run
             if in_run:
                 final_px = 0 if reverse else img_width
                 runs.append((run_start, final_px, current_state))
@@ -480,58 +607,139 @@ class GCodeGenerator:
                     self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
                 continue
             
-            # Calculate X position for start of this scanline
-            if line_idx == 0:
-                # First scanline: position at start (X=0 in relative coordinates)
-                # We're already at the start position, so no X move needed for forward
-                # For reverse, we need to move to the right end
-                if reverse:
-                    x_move = img_width * px_to_mm
-                    self._emit(f"G1 X{x_move:.3f} ; Move to reverse scanline start")
+            # If image is rotated, transform scanline points
+            if has_rotation:
+                # Transform each run from local to canvas coordinates
+                scanline_segments = []
+                for run_start_px, run_end_px, is_on in runs:
+                    # Convert pixel coordinates to local mm coordinates
+                    if reverse:
+                        local_x_start = (img_width - run_start_px) * px_to_mm
+                        local_x_end = (img_width - run_end_px) * px_to_mm
+                    else:
+                        local_x_start = run_start_px * px_to_mm
+                        local_x_end = run_end_px * px_to_mm
+                    
+                    # Local Y: 0 = top, height = bottom
+                    local_y = out_height_mm - (line_idx * line_spacing_mm)
+                    
+                    # Create points in local coordinate system
+                    p1_local = Point(local_x_start, local_y)
+                    p2_local = Point(local_x_end, local_y)
+                    
+                    # Transform from local to canvas coordinates
+                    transformed_points = image_shape.apply_transform([p1_local, p2_local])
+                    p1_canvas = transformed_points[0]
+                    p2_canvas = transformed_points[1]
+                    
+                    scanline_segments.append((p1_canvas, p2_canvas, is_on))
+                
+                # Convert to laser coordinates and emit
+                if scanline_segments:
+                    first_seg = scanline_segments[0]
+                    start_point = first_seg[0] if not reverse else first_seg[1]
+                    laser_start = self._canvas_to_laser(start_point, document_height, document_width)
+                    
+                    # Move to start
+                    if abs(laser_start.x - self._current_x) > 0.001 or abs(laser_start.y - self._current_y) > 0.001:
+                        dx = laser_start.x - self._current_x
+                        dy = laser_start.y - self._current_y
+                        self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to scanline start")
+                        self._current_x = laser_start.x
+                        self._current_y = laser_start.y
+                    
+                    # Emit each segment
+                    for p1_canvas, p2_canvas, is_on in scanline_segments:
+                        p1_laser = self._canvas_to_laser(p1_canvas, document_height, document_width)
+                        p2_laser = self._canvas_to_laser(p2_canvas, document_height, document_width)
+                        
+                        # Move to segment start if needed
+                        if abs(p1_laser.x - self._current_x) > 0.001 or abs(p1_laser.y - self._current_y) > 0.001:
+                            dx = p1_laser.x - self._current_x
+                            dy = p1_laser.y - self._current_y
+                            self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to segment start")
+                            self._current_x = p1_laser.x
+                            self._current_y = p1_laser.y
+                        
+                        # Emit the engraving move
+                        dx = p2_laser.x - self._current_x
+                        dy = p2_laser.y - self._current_y
+                        s_value = power if is_on else 0
+                        if abs(dx) > 0.001 or abs(dy) > 0.001:
+                            self._emit(f"G1 X{dx:.3f} Y{dy:.3f} S{s_value}")
+                        self._current_x = p2_laser.x
+                        self._current_y = p2_laser.y
             else:
-                # Subsequent scanlines: need to move X to start and Y up
-                prev_reverse = ((line_idx - 1) % 2 == 1)
+                # No rotation - simple horizontal scanlines in canvas coordinates
+                # Convert canvas Y to laser Y for positioning
+                laser_y = self._canvas_to_laser(Point(img_top_left_x, canvas_y), document_height, document_width).y
                 
-                if reverse:
-                    # This line is reverse: need to be at right end (X = width)
-                    if prev_reverse:
-                        # Last line was also reverse: ended at left (X=0), move to right
-                        x_move = img_width * px_to_mm
+                # Calculate X position for start of this scanline
+                if line_idx == 0:
+                    # First scanline: move to start position
+                    if reverse:
+                        # Start at right edge
+                        canvas_x_start = img_top_left_x + out_width_mm
                     else:
-                        # Last line was forward: ended at right (X=width), already there
-                        x_move = 0
+                        # Start at left edge
+                        canvas_x_start = img_top_left_x
+                    
+                    # Convert to laser coordinates
+                    laser_start = self._canvas_to_laser(Point(canvas_x_start, canvas_y), document_height, document_width)
+                    dx = laser_start.x - self._current_x
+                    dy = laser_start.y - self._current_y
+                    if abs(dx) > 0.001 or abs(dy) > 0.001:
+                        self._emit(f"G0 X{dx:.3f} Y{dy:.3f} ; Move to scanline start")
+                    self._current_x = laser_start.x
+                    self._current_y = laser_start.y
                 else:
-                    # This line is forward: need to be at left end (X=0)
-                    if prev_reverse:
-                        # Last line was reverse: ended at left (X=0), already there
-                        x_move = 0
+                    # Subsequent scanlines: need to move X to start and Y up
+                    prev_reverse = ((line_idx - 1) % 2 == 1)
+                    
+                    if reverse:
+                        # This line is reverse: need to be at right end
+                        if prev_reverse:
+                            # Last line was also reverse: ended at left, move to right
+                            x_move = out_width_mm
+                        else:
+                            # Last line was forward: ended at right, already there
+                            x_move = 0
                     else:
-                        # Last line was forward: ended at right (X=width), move back to left
-                        x_move = -(img_width * px_to_mm)
+                        # This line is forward: need to be at left end
+                        if prev_reverse:
+                            # Last line was reverse: ended at left, already there
+                            x_move = 0
+                        else:
+                            # Last line was forward: ended at right, move back to left
+                            x_move = -out_width_mm
+                    
+                    # Move Y up and X to start position
+                    if abs(x_move) > 0.001:
+                        self._emit(f"G1 X{x_move:.3f} Y{line_spacing_mm:.3f} ; Move to next scanline")
+                    else:
+                        self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
+                    self._current_x += x_move
+                    self._current_y += line_spacing_mm
                 
-                # Move Y up and X to start position
-                if abs(x_move) > 0.001:
-                    self._emit(f"G1 X{x_move:.3f} Y{line_spacing_mm:.3f} ; Move to next scanline")
-                else:
-                    self._emit(f"G1 Y{line_spacing_mm:.3f} ; Move to next scanline")
-            
-            # Generate scanline segments (all in relative mode)
-            # Each run is emitted as a relative move with S parameter
-            for run_start_px, run_end_px, is_on in runs:
-                if reverse:
-                    # Going left: move is negative (from higher pixel to lower)
-                    move_mm = (run_end_px - run_start_px) * px_to_mm
-                else:
-                    # Going right: move is positive
-                    move_mm = (run_end_px - run_start_px) * px_to_mm
-                
-                # Only emit non-zero moves
-                if abs(move_mm) > 0.001:  # Small threshold to avoid rounding errors
-                    s_value = power if is_on else 0
-                    self._emit(f"G1 X{move_mm:.3f} S{s_value}")
+                # Generate scanline segments (all in relative mode)
+                for run_start_px, run_end_px, is_on in runs:
+                    if reverse:
+                        # Going left: move is negative
+                        move_mm = (run_end_px - run_start_px) * px_to_mm
+                    else:
+                        # Going right: move is positive
+                        move_mm = (run_end_px - run_start_px) * px_to_mm
+                    
+                    # Only emit non-zero moves
+                    if abs(move_mm) > 0.001:
+                        s_value = power if is_on else 0
+                        self._emit(f"G1 X{move_mm:.3f} S{s_value}")
+                        self._current_x += move_mm
         
-        # Switch back to absolute mode
-        self._emit("G90 ; Back to absolute mode")
+        # Switch back to absolute mode ONLY if we weren't in relative mode to begin with
+        # (for current position mode, we stay in relative mode)
+        if not self._use_relative_mode:
+            self._emit("G90 ; Back to absolute mode")
         
         # Turn off laser and restore M3 mode
         self._emit("M5 ; Laser off")
@@ -543,48 +751,30 @@ class GCodeGenerator:
         """
         Transform canvas coordinates to laser coordinates.
         
-        Rotates 90° counter-clockwise:
-        - Canvas X (right) → Laser Y (forward)
-        - Canvas Y (down) → Laser X (with proper mapping)
+        Canvas coordinate system: origin at top-left, X increases right, Y increases down
+        Laser coordinate system: origin at bottom-left, X increases right, Y increases up
         
-        Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
-        Canvas bottom-right (width, height) → Laser top-left (0, width)
+        The transformation:
+        1. First, flip Y axis: laser_y = document_height - canvas_y
+        2. Then, apply job origin offset (calculated in laser space) to shift the 
+           selected point of the design to (0,0)
+        
+        With User Origin or Current Position mode:
+        - G92 sets the current laser position as (0,0,0)
+        - All coordinates are relative to this origin
+        - The job_origin offset ensures the selected point of the design is at (0,0)
         """
-        # Rotate 90° CCW: (x, y) → (-y, x) in standard math
-        # But we need to adjust for coordinate systems:
-        # Canvas: origin at top-left, Y increases down, X increases right
-        # Laser: origin at bottom-left, Y increases up, X increases right
-        # 
-        # For 90° CCW rotation mapping canvas to laser:
-        # Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
-        # Canvas bottom-right (width, height) → Laser top-left (0, width)
-        # Canvas top-left (0, 0) → Laser bottom-right (height, 0)
-        # Canvas top-right (width, 0) → Laser top-right (height, width)
-        # Rotate 90° CCW and fix bottom-left → bottom-left mapping
-        # Canvas bottom-left (0, height) should → Laser bottom-left (0, 0)
-        # Currently mapping to bottom-right, so we need to flip Y axis
-        # Canvas coordinate system: X increases right, Y increases down, origin top-left
-        # Laser coordinate system: X increases right, Y increases up, origin bottom-left
-        # 
-        # For 90° CCW rotation: (x, y) → (-y, x) then adjust for coordinate systems
-        # Canvas (0, height) → Laser (0, 0) means:
-        # - laser_x = 0 when canvas_y = height → laser_x = height - canvas_y ✓
-        # - laser_y = 0 when canvas_x = 0 → laser_y = canvas_x ✓
-        # But user says it's going to bottom-right, so maybe Y needs to be flipped?
-        # Try: laser_y = width - canvas_x to flip Y axis
-        # Transform canvas to laser coordinates
-        # Origin (0,0) is correct, but X and Y axes are swapped
-        # Canvas X (right) should map to Laser X (right)
-        # Canvas Y (down) should map to Laser Y (forward/up, with offset)
-        #
-        # Canvas bottom-left (0, height) → Laser bottom-left (0, 0)
-        # Canvas bottom-right (width, height) → Laser bottom-right (width, 0)
-        # Canvas top-left (0, 0) → Laser top-left (0, height)
-        # Canvas top-right (width, 0) → Laser top-right (width, height)
-        #
-        # So we just need to flip the Y axis, not rotate:
-        laser_x = canvas_point.x  # Canvas X (right) → Laser X (right)
-        laser_y = document_height - canvas_point.y  # Canvas Y (down) → Laser Y (up, flipped)
+        # Step 1: Transform canvas to laser coordinates (flip Y axis only)
+        # Canvas X → Laser X (same direction)
+        # Canvas Y → Laser Y (inverted: canvas down = laser up)
+        laser_x_raw = canvas_point.x
+        laser_y_raw = document_height - canvas_point.y
+        
+        # Step 2: Apply job origin offset (calculated in laser space)
+        # This shifts coordinates so the selected job origin point is at (0,0)
+        laser_x = laser_x_raw + self._job_origin_offset_x
+        laser_y = laser_y_raw + self._job_origin_offset_y
+        
         return Point(laser_x, laser_y)
     
     def _generate_fill_pattern(self, closed_path: List[Point], settings: LaserSettings) -> List[List[Point]]:
@@ -815,18 +1005,32 @@ class GCodeGenerator:
         if x == self._current_x and y == self._current_y:
             return
         
-        # Validate coordinates against machine limits
-        is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
-        if not is_valid:
-            self._emit(f"; WARNING: {error_msg}")
-            self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
-            return
+        # In relative mode, we don't validate against absolute machine limits
+        # because coordinates are relative to current position
+        if not self._use_relative_mode:
+            # Validate coordinates against machine limits (absolute mode only)
+            is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
+            if not is_valid:
+                self._emit(f"; WARNING: {error_msg}")
+                self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
+                return
         
-        cmd = "G0"
-        if x != self._current_x:
-            cmd += f" X{x:.3f}"
-        if y != self._current_y:
-            cmd += f" Y{y:.3f}"
+        if self._use_relative_mode:
+            # Output delta from current position
+            dx = x - self._current_x
+            dy = y - self._current_y
+            cmd = "G0"
+            if abs(dx) > 0.0001:
+                cmd += f" X{dx:.3f}"
+            if abs(dy) > 0.0001:
+                cmd += f" Y{dy:.3f}"
+        else:
+            # Output absolute coordinates
+            cmd = "G0"
+            if x != self._current_x:
+                cmd += f" X{x:.3f}"
+            if y != self._current_y:
+                cmd += f" Y{y:.3f}"
         
         self._emit(cmd)
         self._current_x = x
@@ -837,18 +1041,31 @@ class GCodeGenerator:
         if x == self._current_x and y == self._current_y:
             return
         
-        # Validate coordinates against machine limits
-        is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
-        if not is_valid:
-            self._emit(f"; WARNING: {error_msg}")
-            self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
-            return
+        # In relative mode, we don't validate against absolute machine limits
+        if not self._use_relative_mode:
+            # Validate coordinates against machine limits (absolute mode only)
+            is_valid, error_msg = self.settings.validate_coordinate(x, y, 0.0)
+            if not is_valid:
+                self._emit(f"; WARNING: {error_msg}")
+                self._emit(f"; Skipping move to X{x:.3f} Y{y:.3f} (outside work area)")
+                return
         
-        cmd = "G1"
-        if x != self._current_x:
-            cmd += f" X{x:.3f}"
-        if y != self._current_y:
-            cmd += f" Y{y:.3f}"
+        if self._use_relative_mode:
+            # Output delta from current position
+            dx = x - self._current_x
+            dy = y - self._current_y
+            cmd = "G1"
+            if abs(dx) > 0.0001:
+                cmd += f" X{dx:.3f}"
+            if abs(dy) > 0.0001:
+                cmd += f" Y{dy:.3f}"
+        else:
+            # Output absolute coordinates
+            cmd = "G1"
+            if x != self._current_x:
+                cmd += f" X{x:.3f}"
+            if y != self._current_y:
+                cmd += f" Y{y:.3f}"
         
         # Include S value in G1 commands to ensure power is maintained
         # This is especially important for M4 (dynamic) mode, but doesn't hurt for M3
@@ -898,6 +1115,9 @@ class GCodeGenerator:
         self._current_document_height = document.height
         self._current_document_width = document.width
         
+        # Calculate job origin offset (so frame matches where job will engrave)
+        self._job_origin_offset_x, self._job_origin_offset_y = self._calculate_job_origin_offset(document)
+        
         # Calculate the bounding box of all visible shapes (in canvas coordinates)
         design_bounds = document.get_design_bounds()
         
@@ -929,20 +1149,30 @@ class GCodeGenerator:
         self._emit(f"; Document: {document.name}")
         self._emit(f"; Design bounds (laser coords): {laser_width:.2f}mm x {laser_height:.2f}mm")
         self._emit(f"; Position: X{bottom_left_laser.x:.2f} Y{bottom_left_laser.y:.2f}")
+        self._emit(f"; Start From: {self.settings.start_from.value}")
+        self._emit(f"; Job Origin: {self.settings.job_origin.value}")
         self._emit("; Frame mode - laser will NOT be enabled")
         self._emit("")
         
-        # Units
-        if self.settings.use_mm:
-            self._emit("G21 ; Set units to mm")
-        else:
-            self._emit("G20 ; Set units to inches")
+        # Standard G-code setup
+        self._emit("G00 G17 G40 G21 G54")
         
-        # Positioning mode
-        if self.settings.absolute_coords:
-            self._emit("G90 ; Absolute positioning")
+        # For User Origin and Current Position, use RELATIVE mode (G91)
+        # This matches how the main generate() works
+        if self.settings.start_from == StartFrom.CURRENT_POSITION:
+            self._emit("G91 ; Relative positioning (current position/user origin mode)")
+            self._use_relative_mode = True
         else:
-            self._emit("G91 ; Relative positioning")
+            # Home mode uses absolute coordinates
+            if self.settings.absolute_coords:
+                self._emit("G90 ; Absolute positioning")
+            else:
+                self._emit("G91 ; Relative positioning")
+            self._use_relative_mode = not self.settings.absolute_coords
+            
+            # Home if requested
+            if self.settings.home_on_start:
+                self._emit("$H ; Home machine")
         
         # Set rapid speed
         self._emit(f"G0 F{self.settings.rapid_speed} ; Set rapid speed")

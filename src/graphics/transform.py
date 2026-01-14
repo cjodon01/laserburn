@@ -382,25 +382,53 @@ class TransformManager:
                 # Rotate position around transform center
                 orig_x = orig['position_x']
                 orig_y = orig['position_y']
+                orig_scale_x = orig['scale_x']
+                orig_scale_y = orig['scale_y']
                 
-                # Get original shape center
-                bounds = shape.get_bounding_box()
-                shape_cx = (bounds.min_x + bounds.max_x) / 2
-                shape_cy = (bounds.min_y + bounds.max_y) / 2
+                # Calculate ORIGINAL untransformed center from original position and dimensions
+                # This is critical - we must use original values, not transformed bounding box
+                orig_center_x = orig_x
+                orig_center_y = orig_y
+                offset_x = 0.0
+                offset_y = 0.0
                 
-                print(f"  shape center=({shape_cx:.2f}, {shape_cy:.2f})")
-                
-                # Calculate offset from shape position to its center
-                offset_x = shape_cx - orig_x
-                offset_y = shape_cy - orig_y
-                
-                print(f"  offset from pos to center=({offset_x:.2f}, {offset_y:.2f})")
-                
-                # Original center position
-                orig_center_x = orig_x + offset_x
-                orig_center_y = orig_y + offset_y
+                if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                    # Rectangle or ImageShape - center is at position + (width/2 * scale_x, height/2 * scale_y)
+                    offset_x = (shape.width * abs(orig_scale_x)) / 2.0
+                    offset_y = (shape.height * abs(orig_scale_y)) / 2.0
+                    orig_center_x = orig_x + offset_x
+                    orig_center_y = orig_y + offset_y
+                elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                    # Ellipse - position IS the center (no offset)
+                    orig_center_x = orig_x
+                    orig_center_y = orig_y
+                else:
+                    # For Path/Text, we need to calculate from untransformed paths
+                    # Temporarily set shape to original state to get untransformed bounds
+                    temp_pos = shape.position
+                    temp_scale_x = shape.scale_x
+                    temp_scale_y = shape.scale_y
+                    temp_rotation = shape.rotation
+                    
+                    shape.position = Point(orig_x, orig_y)
+                    shape.scale_x = orig_scale_x
+                    shape.scale_y = orig_scale_y
+                    shape.rotation = orig['rotation']
+                    
+                    bounds = shape.get_bounding_box()
+                    orig_center_x = (bounds.min_x + bounds.max_x) / 2
+                    orig_center_y = (bounds.min_y + bounds.max_y) / 2
+                    offset_x = orig_center_x - orig_x
+                    offset_y = orig_center_y - orig_y
+                    
+                    # Restore temporary values
+                    shape.position = temp_pos
+                    shape.scale_x = temp_scale_x
+                    shape.scale_y = temp_scale_y
+                    shape.rotation = temp_rotation
                 
                 print(f"  original center=({orig_center_x:.2f}, {orig_center_y:.2f})")
+                print(f"  offset from pos to center=({offset_x:.2f}, {offset_y:.2f})")
                 
                 # Rotate original center around transform center
                 dx = orig_center_x - self._transform_center.x()
@@ -416,7 +444,7 @@ class TransformManager:
                 
                 print(f"  rotated center=({new_center_x:.2f}, {new_center_y:.2f})")
                 
-                # Calculate new position from new center
+                # Calculate new position from new center (subtract the offset)
                 new_pos_x = new_center_x - offset_x
                 new_pos_y = new_center_y - offset_y
                 shape.position.x = new_pos_x

@@ -52,6 +52,7 @@
   - ✅ Basic shapes (rect, circle, ellipse, line, polyline, polygon)
 - ✅ SVG Exporter
 - ✅ File import/export integration in UI
+- ✅ Image import (PNG, JPG, etc.) - **FULLY IMPLEMENTED**
 - ✅ **Native project file format (.lbrn)** - **FULLY IMPLEMENTED**
   - ✅ JSON-based project file format
   - ✅ Complete document serialization (layers, shapes, settings)
@@ -96,6 +97,10 @@
   - ✅ Power scaling with GRBL $30 setting (auto-detected)
   - ✅ Work area validation and limits
   - ✅ Frame function (outline design perimeter)
+  - ✅ **NEW**: G-code optimization improvements
+    - ✅ Changed white space handling from G0 to G1 S0 (matching LightBurn for better controller compatibility)
+    - ✅ Minimum move threshold (0.05mm) to skip tiny moves and reduce file size
+    - ✅ Automatic filtering of very small runs (< 0.05mm) for improved efficiency
 - ✅ G-code export functionality
 - ✅ Path optimization - **FULLY IMPLEMENTED**
   - ✅ Path order optimization (nearest neighbor heuristic)
@@ -141,7 +146,6 @@
   - ✅ Save/load UI integration
 - ❌ DXF Parser - Code in guide, needs to be implemented
 - ❌ DXF Exporter
-- ❌ Image import (PNG, JPG, etc.)
 
 ### Graphics Module
 - ✅ Basic drawing tools (Line, Rectangle, Ellipse, Polygon, Pen) - IMPLEMENTED & INTEGRATED
@@ -185,10 +189,16 @@
     - ✅ G-code compensation functionality
     - ✅ Image warping (when NumPy available)
     - ✅ Edge cases and error handling
-- ❌ Dithering algorithms
+- ✅ Image dithering - **FULLY IMPLEMENTED**
+  - ✅ Multiple dithering algorithms (Floyd-Steinberg, Jarvis-Judice-Ninke, Stucki, Atkinson, Bayer 2x2/4x4/8x8, Threshold)
+  - ✅ Advanced image settings dialog with live preview
+  - ✅ Brightness, contrast, and inversion adjustments
+  - ✅ DPI adjustment with automatic canvas size updates
+  - ✅ Transparency (alpha channel) support - transparent pixels are skipped during engraving
+  - ✅ Performance optimizations (preview downscaling, vectorized operations)
+  - ✅ Canvas preview with dithering applied
 - ❌ Image tracing (vectorization)
-- ❌ Brightness/contrast adjustments
-- ❌ Scanline generation
+- ✅ Scanline generation - **IMPLEMENTED** (part of G-code generation)
 
 ### Materials Module
 - ❌ SQLite database implementation
@@ -213,6 +223,7 @@ The application is now functional and ready for production use:
 - ✅ **LETTERING/PRINTING WORKING** - Text tool fully functional, text engraves correctly
 - ✅ SVG import works - **FULLY FUNCTIONAL** with all path commands, transforms, and arcs
 - ✅ SVG export works
+- ✅ Image import works - **FULLY FUNCTIONAL** (PNG, JPG, etc.) with dithering and processing options
 - ✅ G-code export works - **WITH PATH OPTIMIZATION**
 - ✅ Laser controller support (GRBL) - **FULLY INTEGRATED & OPERATIONAL**
 - ✅ Job management system - **FULLY INTEGRATED & OPERATIONAL**

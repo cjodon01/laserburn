@@ -5,7 +5,7 @@ Properties Panel - Dock widget for editing shape properties.
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QFormLayout, QLineEdit,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox, QGroupBox,
-    QPushButton, QSlider, QHBoxLayout
+    QPushButton, QSlider, QHBoxLayout, QFontComboBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from typing import List, Optional
@@ -112,9 +112,8 @@ class PropertiesPanel(QWidget):
         self._text_group = QGroupBox("Text Properties")
         self._text_layout = QFormLayout()
         
-        # Font family
-        self._font_family_combo = QComboBox()
-        self._font_family_combo.addItems(["Arial", "Times New Roman", "Courier New", "Helvetica", "Verdana", "Georgia", "Comic Sans MS"])
+        # Font family - use QFontComboBox to show all available system fonts
+        self._font_family_combo = QFontComboBox()
         self._font_family_combo.currentTextChanged.connect(self._on_text_property_changed)
         self._text_layout.addRow("Font Family:", self._font_family_combo)
         
@@ -177,6 +176,12 @@ class PropertiesPanel(QWidget):
         self._invert_check = QCheckBox()
         self._invert_check.toggled.connect(self._on_image_property_changed)
         self._image_layout.addRow("Invert:", self._invert_check)
+        
+        # Skip white
+        self._skip_white_check = QCheckBox("Skip white pixels (faster)")
+        self._skip_white_check.setToolTip("Skip white pixels entirely during engraving (like LightBurn)")
+        self._skip_white_check.toggled.connect(self._on_image_property_changed)
+        self._image_layout.addRow("", self._skip_white_check)
         
         # Advanced settings button
         self._image_settings_btn = QPushButton("Advanced Settings...")
@@ -287,11 +292,13 @@ class PropertiesPanel(QWidget):
             self._dither_combo.blockSignals(True)
             self._threshold_spin.blockSignals(True)
             self._invert_check.blockSignals(True)
+            self._skip_white_check.blockSignals(True)
             
             # Set values from image shape
             self._dpi_spin.setValue(image_shape.dpi)
             self._threshold_spin.setValue(image_shape.threshold)
             self._invert_check.setChecked(image_shape.invert)
+            self._skip_white_check.setChecked(getattr(image_shape, 'skip_white', True))
             
             # Map dither mode to combo index
             mode_map = {
@@ -405,6 +412,7 @@ class PropertiesPanel(QWidget):
                 shape.dpi = self._dpi_spin.value()
                 shape.threshold = self._threshold_spin.value()
                 shape.invert = self._invert_check.isChecked()
+                shape.skip_white = self._skip_white_check.isChecked()
                 
                 idx = self._dither_combo.currentIndex()
                 if 0 <= idx < len(dither_modes):

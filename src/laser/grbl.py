@@ -45,6 +45,7 @@ class GRBLController(LaserController):
         self._buffer_count = 0
         self._gcode_lines: list = []
         self._current_line: int = 0
+        self._total_valid_lines: int = 0  # Cached count of valid (non-comment) lines
         self._response_event = threading.Event()
         self._last_response = ""
         self._console_callbacks = []  # Callbacks for console output
@@ -242,6 +243,7 @@ class GRBLController(LaserController):
         self._gcode_lines = []
         self._current_line = 0
         self._buffer_count = 0
+        self._total_valid_lines = 0
         self.status.job_state = JobState.IDLE
         self.status.progress = 0.0
         
@@ -549,11 +551,14 @@ class GRBLController(LaserController):
         if self.status.job_state == JobState.RUNNING:
             return False
         
-        # Parse G-code into lines
-        self._gcode_lines = [
-            line.strip() for line in gcode.split('\n')
-            if line.strip() and not line.strip().startswith(';')
-        ]
+        # Fast split by newlines (doesn't process content yet)
+        # This is much faster than parsing all lines upfront
+        raw_lines = gcode.split('\n')
+        
+        # Store raw lines, process on-demand when sending
+        # This avoids blocking on large files (1M+ lines)
+        self._gcode_lines = raw_lines
+        self._total_valid_lines = 0  # Will be calculated lazily in _send_job thread
         self._current_line = 0
         self._buffer_count = 0
         
@@ -614,6 +619,7 @@ class GRBLController(LaserController):
         
         self._gcode_lines = []
         self._current_line = 0
+        self._total_valid_lines = 0
         
         self.status.job_state = JobState.CANCELLED
         self._notify_status()
@@ -857,43 +863,110 @@ class GRBLController(LaserController):
             self._notify_status()
     
     def _send_job(self):
-        """Send job G-code with flow control."""
-        while (self._current_line < len(self._gcode_lines) and 
+        """Send job G-code with flow control.
+        
+        Uses character-counting flow control for optimal throughput:
+        - GRBL has a 128-byte serial RX buffer
+        - We track bytes in flight, not just lines
+        - This allows maximum throughput while preventing buffer overflows
+        - Lines are processed on-demand (lazy parsing) for fast startup
+        """
+        # GRBL RX buffer size (standard is 128 bytes, leave some margin)
+        RX_BUFFER_SIZE = 120  # Slightly less than 128 for safety
+        
+        # Track bytes in flight for character-counting flow control
+        bytes_in_flight = 0
+        line_lengths = []  # Track length of each line we've sent
+        
+        total_raw_lines = len(self._gcode_lines)
+        
+        # Count valid lines for progress (do this once, but efficiently)
+        # Only count if we haven't already
+        if self._total_valid_lines == 0:
+            self._total_valid_lines = sum(
+                1 for line in self._gcode_lines
+                if line.strip() and not line.strip().startswith(';')
+            )
+        
+        total_valid_lines = self._total_valid_lines if self._total_valid_lines > 0 else total_raw_lines
+        valid_lines_sent = 0
+        last_progress_update = time.time()
+        last_progress_pct = 0.0
+        
+        while (self._current_line < total_raw_lines and 
                self.status.job_state == JobState.RUNNING):
             
-            # Check buffer space
-            if self._buffer_count >= 5:  # Keep some buffer room
-                time.sleep(0.01)
+            # Process line on-demand: strip and check if valid
+            raw_line = self._gcode_lines[self._current_line]
+            line = raw_line.strip()
+            
+            # Skip empty lines and comments
+            if not line or line.startswith(';'):
+                self._current_line += 1
                 continue
             
-            line = self._gcode_lines[self._current_line]
+            line_bytes = len(line) + 1  # +1 for newline
+            
+            # Wait if adding this line would overflow buffer
+            while bytes_in_flight + line_bytes > RX_BUFFER_SIZE:
+                # Wait for an "ok" response to free buffer space
+                time.sleep(0.001)  # Very short sleep for responsiveness
+                
+                # Check if job was cancelled
+                if self.status.job_state != JobState.RUNNING:
+                    return
+                
+                # Process any pending "ok" responses (handled in _read_loop)
+                # The buffer count is decremented there, but we need line lengths
+                while self._buffer_count < len(line_lengths) and line_lengths:
+                    freed_bytes = line_lengths.pop(0)
+                    bytes_in_flight -= freed_bytes
             
             # Send line
-            self._serial.write((line + '\n').encode())
-            self._buffer_count += 1
-            self._current_line += 1
-            
-            # Update progress - notify every line or every 10 lines for performance
-            if self._current_line % 10 == 0 or self._current_line == len(self._gcode_lines):
-                self.status.progress = (self._current_line / len(self._gcode_lines)) * 100
+            try:
+                self._serial.write((line + '\n').encode())
+                bytes_in_flight += line_bytes
+                line_lengths.append(line_bytes)
+                self._buffer_count += 1
+                self._current_line += 1
+                valid_lines_sent += 1
+            except Exception as e:
+                self.status.error_message = f"Serial write error: {e}"
+                self.status.job_state = JobState.ERROR
                 self._notify_status()
+                return
+            
+            # Update progress less frequently for performance
+            # Only update every 0.5 seconds or on significant progress
+            now = time.time()
+            if total_valid_lines > 0:
+                current_pct = (valid_lines_sent / total_valid_lines) * 100
+            else:
+                current_pct = (self._current_line / total_raw_lines) * 100
+            if now - last_progress_update >= 0.5 or current_pct - last_progress_pct >= 5.0:
+                self.status.progress = current_pct
+                self._notify_status()
+                last_progress_update = now
+                last_progress_pct = current_pct
         
-        # Final progress update
-        if len(self._gcode_lines) > 0:
-            self.status.progress = (self._current_line / len(self._gcode_lines)) * 100
-            self._notify_status()
-        
-        # Wait for completion
+        # All lines sent - wait for GRBL to finish executing
+        # The buffer might still have commands queued
         while self._buffer_count > 0 and self.status.job_state == JobState.RUNNING:
-            time.sleep(0.1)
-            # Update progress while waiting (buffer draining)
-            if len(self._gcode_lines) > 0:
-                # Progress is based on lines sent, but we're waiting for buffer to drain
-                # Estimate: lines sent + some buffer progress
-                estimated_progress = min(99.0, (self._current_line / len(self._gcode_lines)) * 100)
-                if abs(estimated_progress - self.status.progress) > 1.0:  # Update if changed by >1%
-                    self.status.progress = estimated_progress
-                    self._notify_status()
+            time.sleep(0.05)
+            # Sync line_lengths with buffer_count as "ok" responses come in
+            while self._buffer_count < len(line_lengths) and line_lengths:
+                line_lengths.pop(0)
+            
+            # Update progress periodically while waiting
+            now = time.time()
+            if now - last_progress_update >= 0.5:
+                if total_valid_lines > 0:
+                    estimated_progress = min(99.5, (valid_lines_sent / total_valid_lines) * 100)
+                else:
+                    estimated_progress = min(99.5, (self._current_line / total_raw_lines) * 100)
+                self.status.progress = estimated_progress
+                self._notify_status()
+                last_progress_update = now
         
         if self.status.job_state == JobState.RUNNING:
             self.status.job_state = JobState.COMPLETED

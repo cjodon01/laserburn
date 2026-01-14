@@ -719,6 +719,7 @@ class ImageShape(Shape):
         self.width = width
         self.height = height
         self.image_data = image_data  # Grayscale numpy array
+        self.alpha_channel = None  # Alpha channel (transparency mask) - None means no transparency
         self.filepath = filepath
         
         # Image engraving settings
@@ -728,6 +729,8 @@ class ImageShape(Shape):
         self.dither_mode = "floyd_steinberg"  # Dithering algorithm
         self.brightness = 0.0  # Brightness adjustment (-100 to 100)
         self.contrast = 1.0  # Contrast multiplier (0.0 to 3.0, 1.0 = normal)
+        self.skip_white = True  # Skip white pixels entirely (like LightBurn) - faster engraving
+        self.white_threshold = 250  # Pixels >= this value are considered "white" and skipped
         
         # Set default laser settings for engraving
         self.laser_settings.operation = "image"
@@ -790,6 +793,9 @@ class ImageShape(Shape):
         img.dither_mode = self.dither_mode
         img.brightness = self.brightness
         img.contrast = self.contrast
+        img.skip_white = self.skip_white
+        img.white_threshold = self.white_threshold
+        img.alpha_channel = self.alpha_channel.copy() if self.alpha_channel is not None else None
         img.laser_settings = LaserSettings(**self.laser_settings.__dict__)
         return img
     

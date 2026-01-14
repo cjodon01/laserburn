@@ -34,8 +34,19 @@ class ImageDitherer:
     def __init__(self, method: DitheringMethod = DitheringMethod.FLOYD_STEINBERG):
         self.method = method
     
-    def dither(self, image: np.ndarray, threshold: int = 128) -> np.ndarray:
-        """Apply dithering to a grayscale image."""
+    def dither(self, image: np.ndarray, threshold: int = 128, alpha_channel: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Apply dithering to a grayscale image.
+        
+        Args:
+            image: Grayscale image array
+            threshold: Threshold for binary conversion
+            alpha_channel: Optional alpha channel - transparent pixels (alpha < 255) are not dithered
+                          and remain as 255 (white/skip) in the output
+        
+        Returns:
+            Dithered binary image (0 = black, 255 = white/transparent)
+        """
         if image.dtype != np.uint8:
             if image.max() <= 1.0:
                 image = (image * 255).astype(np.uint8)
@@ -45,24 +56,33 @@ class ImageDitherer:
         if len(image.shape) == 3:
             image = np.dot(image[...,:3], [0.299, 0.587, 0.114]).astype(np.uint8)
         
+        # Apply dithering
         if self.method == DitheringMethod.NONE:
-            return self._threshold(image, threshold)
+            result = self._threshold(image, threshold)
         elif self.method == DitheringMethod.FLOYD_STEINBERG:
-            return self._floyd_steinberg(image, threshold)
+            result = self._floyd_steinberg(image, threshold)
         elif self.method == DitheringMethod.JARVIS_JUDICE_NINKE:
-            return self._jarvis_judice_ninke(image, threshold)
+            result = self._jarvis_judice_ninke(image, threshold)
         elif self.method == DitheringMethod.ATKINSON:
-            return self._atkinson(image, threshold)
+            result = self._atkinson(image, threshold)
         elif self.method == DitheringMethod.BAYER_2x2:
-            return self._bayer(image, 2, threshold)
+            result = self._bayer(image, 2, threshold)
         elif self.method == DitheringMethod.BAYER_4x4:
-            return self._bayer(image, 4, threshold)
+            result = self._bayer(image, 4, threshold)
         elif self.method == DitheringMethod.BAYER_8x8:
-            return self._bayer(image, 8, threshold)
+            result = self._bayer(image, 8, threshold)
         elif self.method == DitheringMethod.STUCKI:
-            return self._stucki(image, threshold)
+            result = self._stucki(image, threshold)
         else:
-            return self._threshold(image, threshold)
+            result = self._threshold(image, threshold)
+        
+        # Preserve transparency: transparent pixels should remain white (255) = skip
+        if alpha_channel is not None:
+            # Mark transparent pixels as white (255) so they're skipped during engraving
+            transparent_mask = alpha_channel < 255
+            result[transparent_mask] = 255
+        
+        return result
     
     def _threshold(self, image: np.ndarray, threshold: int) -> np.ndarray:
         return np.where(image >= threshold, 255, 0).astype(np.uint8)
@@ -190,9 +210,33 @@ def load_image(filepath: str) -> Optional[np.ndarray]:
         return None
 
 
-def adjust_brightness_contrast(image: np.ndarray, brightness: float = 0.0, contrast: float = 1.0) -> np.ndarray:
-    """Adjust brightness and contrast of an image."""
+def adjust_brightness_contrast(image: np.ndarray, brightness: float = 0.0, contrast: float = 1.0, 
+                                alpha_channel: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Adjust brightness and contrast of an image.
+    
+    Args:
+        image: Grayscale image array
+        brightness: Brightness adjustment (-100 to 100)
+        contrast: Contrast multiplier (0.0 to 3.0, 1.0 = normal)
+        alpha_channel: Optional alpha channel - transparent pixels (alpha < 255) are not adjusted
+    
+    Returns:
+        Adjusted image array
+    """
     result = image.copy().astype(np.float32)
-    result = (result - 127.5) * contrast + 127.5
-    result += brightness
+    
+    # Create mask for non-transparent pixels
+    if alpha_channel is not None:
+        # Only adjust pixels that are not fully transparent
+        mask = alpha_channel >= 255
+        # Apply adjustments only to non-transparent pixels
+        result[mask] = (result[mask] - 127.5) * contrast + 127.5
+        result[mask] += brightness
+        # Leave transparent pixels unchanged (they'll be skipped during engraving)
+    else:
+        # No transparency - adjust all pixels
+        result = (result - 127.5) * contrast + 127.5
+        result += brightness
+    
     return np.clip(result, 0, 255).astype(np.uint8)

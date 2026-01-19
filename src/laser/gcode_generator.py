@@ -373,7 +373,11 @@ class GCodeGenerator:
                 
                 # Check if fill is enabled
                 if settings.fill_enabled:
-                    # Generate fill patterns for closed paths
+                    # For paths with multiple subpaths (like compound paths in SVG),
+                    # use even-odd fill rule: inner paths become holes
+                    closed_paths = []
+                    open_paths = []
+                    
                     for path in valid_paths:
                         if len(path) >= 3:  # Need at least 3 points for a closed shape
                             # Check if path is closed (first and last points are same or close)
@@ -381,18 +385,24 @@ class GCodeGenerator:
                                        abs(path[0].y - path[-1].y) < 0.01)
                             
                             if is_closed:
-                                # Generate fill pattern
-                                fill_lines = self._generate_fill_pattern(path, settings)
-                                fill_paths.extend(fill_lines)
-                                fill_settings.extend([settings] * len(fill_lines))
+                                closed_paths.append(path)
                             else:
-                                # Not closed - add as outline
-                                all_paths.append(path)
-                                path_settings.append(settings)
+                                open_paths.append(path)
                         else:
                             # Too few points - add as outline
-                            all_paths.append(path)
-                            path_settings.append(settings)
+                            open_paths.append(path)
+                    
+                    # Generate fill using even-odd rule with ALL closed paths
+                    # This properly handles holes (inner paths cut out from outer paths)
+                    if closed_paths:
+                        fill_lines = self._generate_fill_pattern_with_holes(closed_paths, settings)
+                        fill_paths.extend(fill_lines)
+                        fill_settings.extend([settings] * len(fill_lines))
+                    
+                    # Add open paths as outlines
+                    for path in open_paths:
+                        all_paths.append(path)
+                        path_settings.append(settings)
                 else:
                     # No fill - add as outline paths
                     for path in valid_paths:
@@ -841,6 +851,132 @@ class GCodeGenerator:
         
         return fill_lines
     
+    def _generate_fill_pattern_with_holes(self, all_paths: List[List[Point]], settings: LaserSettings) -> List[List[Point]]:
+        """
+        Generate fill pattern using even-odd rule with multiple paths (outer boundary + holes).
+        
+        This is the key to proper SVG compound path filling:
+        - Outer boundary defines what to fill
+        - Inner paths (holes) define what to NOT fill
+        - Even-odd rule: count intersections to determine inside/outside
+        
+        Args:
+            all_paths: List of closed paths (first is typically outer boundary, rest are holes)
+            settings: Laser settings with fill parameters
+        
+        Returns:
+            List of line segments for filling
+        """
+        if not all_paths:
+            return []
+        
+        # Get combined bounding box of all paths
+        all_points = [p for path in all_paths for p in path]
+        if len(all_points) < 3:
+            return []
+        
+        min_x = min(p.x for p in all_points)
+        max_x = max(p.x for p in all_points)
+        min_y = min(p.y for p in all_points)
+        max_y = max(p.y for p in all_points)
+        
+        fill_lines = []
+        pattern = settings.fill_pattern
+        spacing = settings.line_interval
+        
+        if pattern == "horizontal" or pattern not in ["vertical", "crosshatch", "diagonal"]:
+            fill_lines = self._generate_horizontal_fill_with_holes(all_paths, min_y, max_y, spacing)
+        elif pattern == "vertical":
+            fill_lines = self._generate_vertical_fill_with_holes(all_paths, min_x, max_x, spacing)
+        elif pattern == "crosshatch":
+            h_lines = self._generate_horizontal_fill_with_holes(all_paths, min_y, max_y, spacing)
+            v_lines = self._generate_vertical_fill_with_holes(all_paths, min_x, max_x, spacing)
+            fill_lines = h_lines + v_lines
+        elif pattern == "diagonal":
+            # For diagonal, use horizontal with rotation (simplified for now)
+            fill_lines = self._generate_horizontal_fill_with_holes(all_paths, min_y, max_y, spacing)
+        
+        return fill_lines
+    
+    def _generate_horizontal_fill_with_holes(self, all_paths: List[List[Point]], min_y: float, max_y: float, spacing: float) -> List[List[Point]]:
+        """
+        Generate horizontal fill lines using even-odd rule with multiple paths.
+        
+        For each scanline:
+        1. Find ALL intersections with ALL paths
+        2. Sort by X coordinate
+        3. Toggle inside/outside state at each intersection (even-odd rule)
+        4. Create fill segments for "inside" portions
+        """
+        fill_lines = []
+        y = min_y
+        line_num = 0
+        
+        while y <= max_y:
+            # Collect intersections from ALL paths
+            all_intersections = []
+            for path in all_paths:
+                intersections = self._find_line_intersections(path, y, horizontal=True)
+                all_intersections.extend(intersections)
+            
+            # Sort all intersections by X coordinate
+            all_intersections.sort()
+            
+            # Use even-odd rule: toggle inside/outside at each intersection
+            # Create segments for portions that are "inside" (odd number of crossings)
+            for i in range(0, len(all_intersections) - 1, 2):
+                if i + 1 < len(all_intersections):
+                    x1 = all_intersections[i]
+                    x2 = all_intersections[i + 1]
+                    
+                    # Only create segment if there's actual distance
+                    if abs(x2 - x1) > 0.001:
+                        # Alternate direction for efficiency
+                        if line_num % 2 == 1:
+                            fill_lines.append([Point(x2, y), Point(x1, y)])
+                        else:
+                            fill_lines.append([Point(x1, y), Point(x2, y)])
+            
+            y += spacing
+            line_num += 1
+        
+        return fill_lines
+    
+    def _generate_vertical_fill_with_holes(self, all_paths: List[List[Point]], min_x: float, max_x: float, spacing: float) -> List[List[Point]]:
+        """
+        Generate vertical fill lines using even-odd rule with multiple paths.
+        """
+        fill_lines = []
+        x = min_x
+        line_num = 0
+        
+        while x <= max_x:
+            # Collect intersections from ALL paths
+            all_intersections = []
+            for path in all_paths:
+                intersections = self._find_line_intersections(path, x, horizontal=False)
+                all_intersections.extend(intersections)
+            
+            # Sort all intersections by Y coordinate
+            all_intersections.sort()
+            
+            # Use even-odd rule
+            for i in range(0, len(all_intersections) - 1, 2):
+                if i + 1 < len(all_intersections):
+                    y1 = all_intersections[i]
+                    y2 = all_intersections[i + 1]
+                    
+                    if abs(y2 - y1) > 0.001:
+                        if line_num % 2 == 1:
+                            fill_lines.append([Point(x, y2), Point(x, y1)])
+                        else:
+                            fill_lines.append([Point(x, y1), Point(x, y2)])
+            
+            x += spacing
+            line_num += 1
+        
+        return fill_lines
+    
     def _generate_horizontal_fill(self, path: List[Point], min_y: float, max_y: float, spacing: float) -> List[List[Point]]:
         """Generate horizontal fill lines."""
         fill_lines = []
@@ -1162,7 +1298,12 @@ class GCodeGenerator:
                 scanlines[y_coord].append(fill_line)
         
         # Sort scanlines by Y coordinate
-        sorted_scanlines = sorted(scanlines.items())
+        # Since canvas Y increases downward but laser Y increases upward,
+        # we need to reverse the sort order so scanlines go from bottom to top in laser space
+        # Canvas Y: 0 (top) -> 200 (bottom)
+        # Laser Y: 200 (top) -> 0 (bottom)
+        # To scan bottom-to-top in laser: go from high canvas Y to low canvas Y
+        sorted_scanlines = sorted(scanlines.items(), reverse=True)
         
         # Move to first scanline start position (in absolute mode first)
         if sorted_scanlines:
@@ -1226,8 +1367,18 @@ class GCodeGenerator:
             
             # Move to next scanline (laser off, no S value - keeps previous S0 state)
             if scanline_index < len(sorted_scanlines) - 1:
-                next_y = sorted_scanlines[scanline_index + 1][0]
-                dy = next_y - y_coord
+                next_y_canvas = sorted_scanlines[scanline_index + 1][0]
+                current_y_canvas = y_coord
+                
+                # Convert canvas Y coordinates to laser Y coordinates to calculate correct dy
+                # Canvas Y increases downward, Laser Y increases upward
+                # laser_y = document_height - canvas_y
+                # Since we're scanning from high canvas Y to low canvas Y (reverse sorted),
+                # in laser space we're going from low laser Y to high laser Y (bottom to top)
+                current_y_laser = document_height - current_y_canvas
+                next_y_laser = document_height - next_y_canvas
+                dy = next_y_laser - current_y_laser  # Should be positive (moving up in laser space)
+                
                 if abs(dy) > 0.001:
                     self._emit(f"G1 Y{dy:.3f} ; Move to next scanline")
                     self._current_y += dy

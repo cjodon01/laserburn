@@ -137,8 +137,60 @@ class ShapeGraphicsItem(QGraphicsPathItem):
             # Normal: use base pen
             pen = self._base_pen
         
+        # Check if fill is enabled for this shape's layer
+        brush = QBrush()  # Default: no brush (outline only)
+        layer = self.data(1)  # Layer is stored in data(1)
+        
+        if layer:
+            # Get settings - check layer settings first, then shape settings
+            from ..core.layer import Layer
+            from ..core.shapes import LaserSettings, Path, Rectangle, Ellipse
+            
+            if isinstance(layer, Layer):
+                if layer.use_layer_settings:
+                    settings = layer.laser_settings
+                else:
+                    settings = self._shape.laser_settings if hasattr(self._shape, 'laser_settings') else LaserSettings()
+                
+                # Check if fill is enabled and path is closed
+                if settings.fill_enabled:
+                    is_closed = False
+                    
+                    # Check shape type for closed shapes
+                    if isinstance(self._shape, (Rectangle, Ellipse)):
+                        # Rectangles and ellipses are always closed
+                        is_closed = True
+                    elif isinstance(self._shape, Path):
+                        # Path shapes have a closed attribute
+                        is_closed = self._shape.closed
+                    else:
+                        # For other shapes, check if paths are closed
+                        paths = self._shape.get_paths() if hasattr(self._shape, 'get_paths') else []
+                        for path_points in paths:
+                            if len(path_points) >= 3:
+                                # Check if first and last points are the same (closed path)
+                                first = path_points[0]
+                                last = path_points[-1]
+                                if abs(first.x - last.x) < 0.01 and abs(first.y - last.y) < 0.01:
+                                    is_closed = True
+                                    break
+                    
+                    if is_closed:
+                        # Fill with layer color (darker for visibility, like LightBurn)
+                        try:
+                            layer_color = QColor(layer.color)
+                            # Make fill color darker/semi-transparent for better visibility
+                            fill_color = QColor(layer_color)
+                            fill_color.setAlpha(200)  # Semi-transparent
+                            # Darken the color slightly to match LightBurn's filled preview
+                            fill_color = fill_color.darker(130)
+                            brush = QBrush(fill_color)
+                        except:
+                            # Fallback to a default fill color
+                            brush = QBrush(QColor(100, 100, 100, 200))
+        
         painter.setPen(pen)
-        painter.setBrush(QBrush())  # No brush
+        painter.setBrush(brush)
         painter.drawPath(self.path())
     
     def itemChange(self, change: QGraphicsItem.GraphicsItemChange, value):
@@ -212,6 +264,10 @@ class ImageGraphicsItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        
+        # Enable transparency support for images with alpha channel
+        if hasattr(image_shape, 'alpha_channel') and image_shape.alpha_channel is not None:
+            self.setOpacity(1.0)  # Full opacity, but alpha channel in pixmap handles transparency
         
         # Accept hover events for highlighting
         self.setAcceptHoverEvents(True)
@@ -325,20 +381,13 @@ class ImageGraphicsItem(QGraphicsItem):
         
         # Create RGBA image to show transparency properly
         if alpha_channel is not None:
-            # Create checkerboard pattern for transparent areas (like LightBurn)
-            checkerboard = self._create_checkerboard(width, height, 8)
-            
-            # Composite image onto checkerboard for transparent areas
-            rgb_data = np.stack([img_data, img_data, img_data], axis=-1)
-            alpha_3d = alpha_channel[:, :, np.newaxis] / 255.0
-            
-            # Blend: transparent areas show checkerboard, opaque areas show image
-            composite = (rgb_data * alpha_3d + checkerboard * (1 - alpha_3d)).astype(np.uint8)
-            
-            # Create RGBA image
+            # Use actual alpha channel for true transparency (like LightBurn)
+            # Create RGBA image with real alpha channel
             rgba_data = np.zeros((height, width, 4), dtype=np.uint8)
-            rgba_data[:, :, :3] = composite
-            rgba_data[:, :, 3] = 255  # Full opacity for display
+            rgba_data[:, :, 0] = img_data  # R channel
+            rgba_data[:, :, 1] = img_data  # G channel
+            rgba_data[:, :, 2] = img_data  # B channel
+            rgba_data[:, :, 3] = alpha_channel  # A channel (actual transparency)
             
             bytes_per_line = 4 * width
             qimage = QImage(
@@ -420,6 +469,9 @@ class ImageGraphicsItem(QGraphicsItem):
         
         # Draw image or placeholder
         if self._pixmap and not self._pixmap.isNull():
+            # Enable alpha blending for transparency
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             painter.drawPixmap(rect.toRect(), self._pixmap)
         else:
             painter.setPen(QPen(QColor(100, 100, 100), 1))

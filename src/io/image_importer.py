@@ -102,12 +102,19 @@ class ImageImporter:
                 img_gray = (0.299 * rgb_array[:, :, 0] + 
                            0.587 * rgb_array[:, :, 1] + 
                            0.114 * rgb_array[:, :, 2]).astype(np.uint8)
-                # Note: We keep the grayscale values as-is (don't set transparent to 0)
-                # The alpha channel will mask these during G-code generation
+                # Set transparent pixels to white (255) so they're skipped during engraving
+                # The alpha channel is stored separately for reference
+                if has_transparency:
+                    img_gray[alpha_channel < 255] = 255
                 img = Image.fromarray(img_gray, mode='L')
             else:
-                # LA mode - already grayscale with alpha, just extract L channel
-                img = img.convert('L')
+                # LA mode - already grayscale with alpha, extract L channel
+                la_array = np.array(img)
+                img_gray = la_array[:, :, 0].astype(np.uint8)  # Extract luminance channel
+                # Set transparent pixels to white (255) so they're skipped during engraving
+                if has_transparency:
+                    img_gray[alpha_channel < 255] = 255
+                img = Image.fromarray(img_gray, mode='L')
         elif img.mode == 'P':
             # Palette mode - check for transparency
             if 'transparency' in img.info:
@@ -120,8 +127,9 @@ class ImageImporter:
                 img_gray = (0.299 * rgb_array[:, :, 0] + 
                            0.587 * rgb_array[:, :, 1] + 
                            0.114 * rgb_array[:, :, 2]).astype(np.uint8)
+                # Set transparent pixels to white (255) so they're skipped during engraving
                 if has_transparency:
-                    img_gray[alpha_channel < 128] = 0
+                    img_gray[alpha_channel < 255] = 255
                 img = Image.fromarray(img_gray, mode='L')
             else:
                 # No transparency - convert normally
@@ -138,8 +146,15 @@ class ImageImporter:
         # Transparent pixels will be skipped during processing and engraving
         
         # Invert if requested (for images where black should be engraved)
+        # Preserve transparent pixels (white/255) even when inverting
         if self.invert:
-            image_data = 255 - image_data
+            if has_transparency and alpha_channel is not None:
+                # Only invert non-transparent pixels
+                mask = alpha_channel >= 255
+                image_data[mask] = 255 - image_data[mask]
+            else:
+                # No transparency - invert all pixels
+                image_data = 255 - image_data
         
         # Get image dimensions
         height_px, width_px = image_data.shape

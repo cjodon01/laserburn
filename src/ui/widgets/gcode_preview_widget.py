@@ -39,6 +39,7 @@ class GCodePreviewWidget(QWidget):
         self._engraving_points = []
         self._bounds = None
         self._preview_pixmap = None
+        self._debug_printed = False  # Reset debug flag for new file
         
         try:
             print(f"Loading G-code file: {filepath}")
@@ -56,6 +57,7 @@ class GCodePreviewWidget(QWidget):
             relative_mode = False
             laser_on = False  # Track laser state across lines
             current_power = 0
+            last_was_rapid = False  # Track if last move was a rapid move (G0)
             
             # Try to parse bounds from header comment for validation
             expected_bounds = None
@@ -103,11 +105,16 @@ class GCodePreviewWidget(QWidget):
                 # Check for laser on/off commands (M3 = on, M4 = dynamic mode, M5 = off)
                 if 'M3' in line or 'M03' in line:
                     # M3 = constant power mode, laser is on
-                    laser_on = True
                     # Extract S value if present
                     s_match = re.search(r'S(\d+)', line)
                     if s_match:
                         current_power = int(s_match.group(1))
+                        laser_on = (current_power > 0)
+                    else:
+                        # M3 without S value - keep previous power or use default
+                        # Don't change current_power if it's already set
+                        if current_power == 0:
+                            current_power = 255  # Default power if not specified
                         laser_on = (current_power > 0)
                 elif 'M4' in line or 'M04' in line:
                     # M4 = dynamic power mode, laser state depends on S value in each G1 move
@@ -124,15 +131,32 @@ class GCodePreviewWidget(QWidget):
                 elif 'M5' in line or 'M05' in line:
                     laser_on = False
                     current_power = 0
+                    last_was_rapid = True  # M5 indicates end of engraving segment
                 
                 # Parse G0/G1 moves
                 if line.startswith('G0') or line.startswith('G1'):
+                    is_rapid = line.startswith('G0')
+                    
                     # Extract X, Y, S values
                     x_match = re.search(r'X([-\d.]+)', line)
                     y_match = re.search(r'Y([-\d.]+)', line)
                     s_match = re.search(r'S(\d+)', line)
                     
-                    # Update position
+                    # Save start position BEFORE updating
+                    start_x = x
+                    start_y = y
+                    
+                    # Track if laser was on BEFORE this move (for determining start point)
+                    laser_was_on_before = current_power > 0 and laser_on
+                    
+                    # Update laser state FIRST if S value is present
+                    # This is critical: S value in a G1 line sets the power FOR that line
+                    if s_match:
+                        current_power = int(s_match.group(1))
+                        laser_on = (current_power > 0)  # S0 = laser off, S>0 = laser on
+                    # Note: If no S value in G1 line, we keep previous state
+                    
+                    # Now update position
                     if x_match:
                         x_val = float(x_match.group(1))
                         if relative_mode:
@@ -147,35 +171,46 @@ class GCodePreviewWidget(QWidget):
                         else:
                             y = y_val
                     
-                    # Update laser state if S value is present in this line
-                    # This is critical for M4 mode where S value controls laser on/off per move
-                    # For M4 mode, every G1 line should have an S value
-                    if s_match:
-                        current_power = int(s_match.group(1))
-                        laser_on = (current_power > 0)  # S0 = laser off, S>0 = laser on
-                    # Note: If no S value in G1 line, we keep previous state (shouldn't happen for M4 mode)
+                    # Determine if this move has the laser on
+                    # The S value in THIS line determines if THIS move is a laser move
+                    laser_on_this_move = current_power > 0 and laser_on
+                    has_movement = x_match is not None or y_match is not None
                     
-                    # Record engraving point ONLY if laser is on (S > 0)
-                    # G0 is rapid move (laser off), G1 is cutting move (may have laser on or off)
-                    # CRITICAL: Only record G1 moves where current_power > 0 (laser is actually on)
-                    # S0 moves must NEVER be recorded - they represent white/empty areas
-                    if line.startswith('G1'):
-                        # Explicitly check: only record if we have a positive power value
-                        # This ensures S0 moves are never recorded
-                        if current_power > 0 and laser_on:
+                    # Record engraving points
+                    if is_rapid:
+                        # G0 rapid move - break the line segment
+                        last_was_rapid = True
+                    elif line.startswith('G1') and has_movement:
+                        if laser_on_this_move:
+                            # This is a laser-on move - record both start and end points
+                            
+                            # Insert segment break if transitioning from rapid/off to laser-on
+                            if last_was_rapid:
+                                self._engraving_points.append(None)
+                            
+                            # Record START point (position before this move)
+                            if abs(x - start_x) > 0.001 or abs(y - start_y) > 0.001:
+                                point_count += 1
+                                if point_count % sample_rate == 0:
+                                    self._engraving_points.append((start_x, start_y))
+                                    min_x = min(min_x, start_x)
+                                    max_x = max(max_x, start_x)
+                                    min_y = min(min_y, start_y)
+                                    max_y = max(max_y, start_y)
+                            
+                            # Record END point (position after this move)
                             point_count += 1
-                            # Sample points for very large files
                             if point_count % sample_rate == 0:
                                 self._engraving_points.append((x, y))
                                 min_x = min(min_x, x)
                                 max_x = max(max_x, x)
                                 min_y = min(min_y, y)
                                 max_y = max(max_y, y)
-                        # All other cases (S0, no S value, laser off) are explicitly NOT recorded
-                        # Debug: Track S0 moves to verify they're not being recorded
-                        elif s_match and current_power == 0:
-                            # This is an S0 move - explicitly skip it (do nothing)
-                            pass
+                            
+                            last_was_rapid = False
+                        else:
+                            # Laser is off (S0 or power=0) - this is like a rapid move
+                            last_was_rapid = True
                 
                 # Progress update for large files
                 if total_lines > 100000 and line_num % 100000 == 0:
@@ -183,16 +218,23 @@ class GCodePreviewWidget(QWidget):
             
             if self._engraving_points:
                 # Recalculate bounds from actual points to ensure accuracy
-                actual_min_x = min(p[0] for p in self._engraving_points)
-                actual_max_x = max(p[0] for p in self._engraving_points)
-                actual_min_y = min(p[1] for p in self._engraving_points)
-                actual_max_y = max(p[1] for p in self._engraving_points)
+                # Filter out None values (segment breaks)
+                valid_points = [p for p in self._engraving_points if p is not None]
+                if valid_points:
+                    actual_min_x = min(p[0] for p in valid_points)
+                    actual_max_x = max(p[0] for p in valid_points)
+                    actual_min_y = min(p[1] for p in valid_points)
+                    actual_max_y = max(p[1] for p in valid_points)
+                else:
+                    actual_min_x = actual_max_x = actual_min_y = actual_max_y = 0.0
                 self._bounds = (actual_min_x, actual_max_x, actual_min_y, actual_max_y)
-                print(f"Found {len(self._engraving_points):,} points (sampled from {point_count:,} total)")
+                valid_point_count = len([p for p in self._engraving_points if p is not None])
+                print(f"Found {valid_point_count:,} points (sampled from {point_count:,} total)")
                 print(f"VERIFIED: Only S>0 moves were recorded - S0 moves were filtered out")
                 print(f"Calculated bounds: X[{actual_min_x:.2f}, {actual_max_x:.2f}] Y[{actual_min_y:.2f}, {actual_max_y:.2f}]")
                 
-                # Compare with expected bounds if available
+                # Compare with expected bounds if available (for validation only)
+                # Always use actual bounds calculated from points for rendering
                 if expected_bounds:
                     exp_min_x, exp_max_x, exp_min_y, exp_max_y = expected_bounds
                     x_diff = abs(actual_min_x - exp_min_x) + abs(actual_max_x - exp_max_x)
@@ -200,15 +242,9 @@ class GCodePreviewWidget(QWidget):
                     if x_diff > 0.1 or y_diff > 0.1:
                         print(f"WARNING: Bounds mismatch! Expected X[{exp_min_x:.2f}, {exp_max_x:.2f}] Y[{exp_min_y:.2f}, {exp_max_y:.2f}]")
                         print(f"  Difference: X={x_diff:.2f}mm, Y={y_diff:.2f}mm")
-                        # For significant differences, use expected bounds from header
-                        # The header bounds represent the actual design area, while calculated bounds
-                        # may include coordinate system artifacts (like Y=0 when design starts at Y=137)
-                        if x_diff > 5.0 or y_diff > 5.0:
-                            print(f"  Large difference detected - using expected bounds from G-code header")
-                            print(f"  (This eliminates empty space from coordinate system artifacts)")
-                            # Use expected bounds for display, but keep actual points for rendering
-                            self._bounds = expected_bounds
-                        # For small differences, trust calculated bounds
+                        print(f"  Using actual bounds from parsed points for rendering")
+                        # Always use actual bounds - points are in actual coordinate space
+                        # Expected bounds are just for validation, not for rendering
                 
                 # Generate preview pixmap
                 self._generate_preview_pixmap()
@@ -264,7 +300,8 @@ class GCodePreviewWidget(QWidget):
         
         # Detect if this is a dense fill pattern (many points in small area)
         # If so, use thinner lines and possibly skip some lines to show pattern structure
-        total_points = len(self._engraving_points)
+        # Filter out None values (segment breaks) when counting points
+        total_points = len([p for p in self._engraving_points if p is not None])
         area_mm2 = width_mm * height_mm if width_mm > 0 and height_mm > 0 else 1.0
         points_per_mm2 = total_points / area_mm2 if area_mm2 > 0 else 0
         
@@ -272,7 +309,12 @@ class GCodePreviewWidget(QWidget):
         base_line_width = min(scale_x, scale_y)
         if points_per_mm2 > 100:  # Very dense pattern (like image scanlines)
             line_width = 1  # Single pixel for dense patterns
-            line_skip = max(1, int(points_per_mm2 / 50))  # Skip some lines to show pattern
+            # For very dense patterns, we still want to show the pattern
+            # Only skip lines if it's extremely dense (like > 1000 points/mm²)
+            if points_per_mm2 > 1000:
+                line_skip = max(1, int(points_per_mm2 / 500))  # Skip some lines for extremely dense patterns
+            else:
+                line_skip = 1  # Don't skip for moderately dense patterns
         else:
             line_width = max(1, min(2, int(base_line_width * 0.3)))  # 1-2 pixels for normal patterns
             line_skip = 1  # Don't skip lines for sparse patterns
@@ -282,26 +324,32 @@ class GCodePreviewWidget(QWidget):
         
         # Draw lines between consecutive points
         # This will properly show fill patterns as filled areas
+        # None values in the list indicate segment breaks (rapid moves)
         lines_drawn = 0
         line_index = 0
-        if len(self._engraving_points) > 1:
-            prev_x, prev_y = self._engraving_points[0]
-            prev_img_x = int((prev_x - min_x) * scale_x)
-            prev_img_y = int((max_y - prev_y) * scale_y)  # Flip Y
+        prev_point = None
+        
+        for point in self._engraving_points:
+            # Handle segment breaks (None indicates rapid move)
+            if point is None:
+                prev_point = None
+                continue
             
-            for x, y in self._engraving_points[1:]:
+            x, y = point
+            # Convert to image coordinates
+            img_x = int((x - min_x) * scale_x)
+            img_y = int((max_y - y) * scale_y)  # Flip Y
+            
+            # Draw line from previous point if we have one
+            if prev_point is not None:
                 line_index += 1
-                
-                # Convert to image coordinates
-                img_x = int((x - min_x) * scale_x)
-                img_y = int((max_y - y) * scale_y)  # Flip Y
                 
                 # Skip lines for very dense patterns to show structure
                 if line_index % line_skip != 0:
-                    # Still update previous position for next line
-                    prev_img_x = img_x
-                    prev_img_y = img_y
+                    prev_point = (img_x, img_y)
                     continue
+                
+                prev_img_x, prev_img_y = prev_point
                 
                 # Draw line if both points are in bounds (or at least one is)
                 if (0 <= img_x < preview_width and 0 <= img_y < preview_height) or \
@@ -309,19 +357,20 @@ class GCodePreviewWidget(QWidget):
                     # Clip line to bounds if needed
                     painter.drawLine(prev_img_x, prev_img_y, img_x, img_y)
                     lines_drawn += 1
-                
-                prev_img_x = img_x
-                prev_img_y = img_y
+            
+            prev_point = (img_x, img_y)
         
         # For very dense patterns, also draw a sample of points to show the pattern
+        # Filter out None values (segment breaks) when drawing points
+        valid_points = [p for p in self._engraving_points if p is not None]
         if points_per_mm2 > 100:
             point_size = 1  # Single pixel for dense patterns
-            point_skip = max(1, int(total_points / 10000))  # Sample points for preview
+            point_skip = max(1, int(len(valid_points) / 10000))  # Sample points for preview
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(255, 50, 50, 180))  # Slightly transparent red
             
             points_drawn = 0
-            for i, (x, y) in enumerate(self._engraving_points):
+            for i, (x, y) in enumerate(valid_points):
                 if i % point_skip != 0:
                     continue
                 # Convert to image coordinates
@@ -340,7 +389,7 @@ class GCodePreviewWidget(QWidget):
             painter.setBrush(QColor(255, 50, 50, 200))  # Slightly transparent red
             
             points_drawn = 0
-            for x, y in self._engraving_points:
+            for x, y in valid_points:
                 # Convert to image coordinates
                 img_x = int((x - min_x) * scale_x)
                 img_y = int((max_y - y) * scale_y)  # Flip Y
@@ -355,7 +404,10 @@ class GCodePreviewWidget(QWidget):
         
         # Convert to pixmap
         self._preview_pixmap = QPixmap.fromImage(image)
-        print(f"Generated preview pixmap: {preview_width}x{preview_height}, drew {lines_drawn:,} lines and {points_drawn:,} points (line_width={line_width})")
+        print(f"Generated preview pixmap: {preview_width}x{preview_height}, drew {lines_drawn:,} lines and {points_drawn:,} points")
+        print(f"  Bounds used: X[{min_x:.2f}, {max_x:.2f}] Y[{min_y:.2f}, {max_y:.2f}]")
+        print(f"  Scale factors: scale_x={scale_x:.2f} px/mm, scale_y={scale_y:.2f} px/mm")
+        print(f"  Points per mm²: {points_per_mm2:.1f}, line_width={line_width}, line_skip={line_skip}")
     
     def _fit_to_view(self):
         """Calculate scale and offset to fit engraving in view."""
@@ -423,18 +475,31 @@ class GCodePreviewWidget(QWidget):
             height_mm = max_y - min_y
             
             if width_mm > 0 and height_mm > 0:
-                # Calculate screen position - pixmap was generated with Y already flipped
+                # Calculate screen position
+                # The pixmap was generated with coordinates:
+                # - img_x = (x - min_x) * scale_x  (X relative to min_x)
+                # - img_y = (max_y - y) * scale_y  (Y flipped: max_y at top)
+                # So pixmap (0, 0) = laser (min_x, max_y)
+                # And pixmap (width, height) = laser (max_x, min_y)
+                
+                # Screen coordinates: screen_y = -laser_y * scale + offset_y
+                # So laser (min_x, max_y) maps to:
                 screen_x = min_x * self._scale + self._offset_x
-                # For Y: pixmap has Y flipped (max_y at top), so we need to account for that
-                # The pixmap's coordinate system: top is max_y, bottom is min_y (flipped)
-                # Screen coordinate: we flip Y again, so -max_y is at top
-                screen_y = -max_y * self._scale + self._offset_y  # Flip Y for screen
+                screen_y = -max_y * self._scale + self._offset_y
                 screen_w = width_mm * self._scale
                 screen_h = height_mm * self._scale
                 
                 # Draw the pixmap
                 source_rect = QRectF(0, 0, self._preview_pixmap.width(), self._preview_pixmap.height())
                 target_rect = QRectF(screen_x, screen_y, screen_w, screen_h)
+                
+                # Debug output (only first time)
+                if not hasattr(self, '_debug_printed'):
+                    print(f"Drawing pixmap: source={source_rect}, target={target_rect}")
+                    print(f"  Screen coords: x={screen_x:.1f}, y={screen_y:.1f}, w={screen_w:.1f}, h={screen_h:.1f}")
+                    print(f"  Scale: {self._scale:.4f}, Offset: ({self._offset_x:.1f}, {self._offset_y:.1f})")
+                    self._debug_printed = True
+                
                 painter.drawPixmap(target_rect, self._preview_pixmap, source_rect)
         else:
             # Fallback: draw lines and points individually (slower, for small files)
@@ -442,12 +507,14 @@ class GCodePreviewWidget(QWidget):
             painter.setPen(QPen(QColor(255, 100, 100), max(1.0, self._scale * 0.2)))  # Red for burn marks
             painter.setBrush(QBrush())  # No fill for lines
             
-            if len(self._engraving_points) > 1:
-                prev_x, prev_y = self._engraving_points[0]
+            # Filter out None values (segment breaks) and draw lines
+            valid_points = [p for p in self._engraving_points if p is not None]
+            if len(valid_points) > 1:
+                prev_x, prev_y = valid_points[0]
                 prev_screen_x = prev_x * self._scale + self._offset_x
                 prev_screen_y = -prev_y * self._scale + self._offset_y
                 
-                for x, y in self._engraving_points[1:]:
+                for x, y in valid_points[1:]:
                     screen_x = x * self._scale + self._offset_x
                     screen_y = -y * self._scale + self._offset_y
                     
@@ -465,7 +532,9 @@ class GCodePreviewWidget(QWidget):
             painter.setBrush(QBrush(QColor(255, 100, 100, 180)))  # Semi-transparent red
             point_size = max(0.5, self._scale * 0.05)  # Smaller points
             
-            for x, y in self._engraving_points:
+            # Filter out None values (segment breaks)
+            valid_points = [p for p in self._engraving_points if p is not None]
+            for x, y in valid_points:
                 screen_x = x * self._scale + self._offset_x
                 screen_y = -y * self._scale + self._offset_y
                 
@@ -490,7 +559,8 @@ class GCodePreviewWidget(QWidget):
         
         # Draw info text
         painter.setPen(QColor(200, 200, 200))
-        info = f"Points: {len(self._engraving_points)} | "
+        valid_point_count = len([p for p in self._engraving_points if p is not None])
+        info = f"Points: {valid_point_count} | "
         if self._bounds:
             width = max_x - min_x
             height = max_y - min_y

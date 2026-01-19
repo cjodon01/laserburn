@@ -10,6 +10,13 @@ from typing import List, Tuple, Optional
 from uuid import UUID, uuid4
 import math
 
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None
+
 
 @dataclass
 class Point:
@@ -767,7 +774,7 @@ class ImageShape(Shape):
     def get_bounding_box(self) -> BoundingBox:
         """Return bounding box from transformed paths (handles scale and rotation)."""
         # If we have transparency, calculate bounding box based on non-transparent pixels only
-        if self.alpha_channel is not None and self.image_data is not None:
+        if self.alpha_channel is not None and self.image_data is not None and HAS_NUMPY:
             # Find bounding box of non-transparent pixels
             # Alpha channel: 0 = fully transparent, 255 = fully opaque
             opaque_mask = self.alpha_channel >= 128  # Consider >= 50% opacity as visible

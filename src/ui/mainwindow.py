@@ -669,9 +669,19 @@ class MainWindow(QMainWindow):
                 self.canvas.set_active_layer
             )
             
-            # Canvas updates refresh layers panel
+            # Canvas selection changes update layers panel selection
             self.canvas.selection_changed.connect(
-                lambda shapes: self.layers_panel.refresh()
+                self._sync_canvas_selection_to_layers_panel
+            )
+            
+            # Layers panel shape selection updates canvas selection
+            self.layers_panel.shape_selected.connect(
+                self._sync_layers_panel_selection_to_canvas
+            )
+            
+            # Layers panel shape deletion removes from canvas
+            self.layers_panel.shape_deleted.connect(
+                self._on_shape_deleted_from_layers_panel
             )
             
             # Layer panel changes update canvas
@@ -692,6 +702,23 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Warning: Error connecting signals: {e}")
             traceback.print_exc()
+    
+    def _sync_canvas_selection_to_layers_panel(self, shapes):
+        """Sync canvas selection to layers panel."""
+        self.layers_panel.refresh()
+        # If exactly one shape is selected, highlight it in the layers panel
+        if len(shapes) == 1:
+            self.layers_panel.select_shape_by_object(shapes[0])
+    
+    def _sync_layers_panel_selection_to_canvas(self, shape):
+        """Sync layers panel selection to canvas."""
+        if shape:
+            self.canvas.select_shape(shape)
+    
+    def _on_shape_deleted_from_layers_panel(self, shape, layer):
+        """Handle shape deletion from layers panel."""
+        # Update canvas to remove the deleted shape
+        self.canvas._update_view()
     
     def _on_controller_status_from_thread(self, status):
         """Wrapper for controller status that safely emits to main thread.

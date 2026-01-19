@@ -839,6 +839,40 @@ class LaserCanvas(QGraphicsView):
         
         self._update_selection()
     
+    def select_shape(self, shape: Shape):
+        """Select a specific shape on the canvas by its object reference."""
+        from ..graphics.text_item import EditableTextItem
+        from ..graphics.items import SelectionHandleItem
+        
+        # Clear current selection first
+        self.scene.clearSelection()
+        self._selection_manager.clear_selection()
+        
+        # Find the graphics item for this shape and select it
+        for item in self.scene.items():
+            if isinstance(item, SelectionHandleItem):
+                continue
+            if item == self._temp_item:
+                continue
+            
+            # Get shape from item
+            item_shape = None
+            if hasattr(item, 'shape_ref'):
+                item_shape = item.shape_ref
+            elif hasattr(item, '_text_shape'):
+                item_shape = item._text_shape
+            else:
+                item_shape = item.data(0)
+            
+            if item_shape == shape:
+                item.setSelected(True)
+                self._selection_manager.select_item(item)
+                # Scroll to make sure it's visible
+                self.centerOn(item)
+                break
+        
+        self._update_selection()
+    
     def zoom_in(self):
         """Zoom in."""
         self._zoom *= 1.25
@@ -1256,6 +1290,8 @@ class LaserCanvas(QGraphicsView):
         if not self._clipboard_shapes:
             return
         
+        from uuid import uuid4
+        
         # Ensure we have an active layer
         if not self._active_layer:
             if self.document.layers:
@@ -1270,6 +1306,9 @@ class LaserCanvas(QGraphicsView):
         for shape in self._clipboard_shapes:
             # Create a new copy (in case user wants to paste multiple times)
             pasted_shape = copy.deepcopy(shape)
+            # CRITICAL: Generate a new unique ID for the pasted shape
+            # Otherwise _update_view will think it's the same as the original
+            pasted_shape.id = uuid4()
             # Offset position for each paste
             pasted_shape.position.x += 10.0
             pasted_shape.position.y += 10.0

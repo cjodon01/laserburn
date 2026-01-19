@@ -918,23 +918,23 @@ class LaserPanel(QWidget):
             )
             return
         
-        # Check if document has any visible shapes
-        has_visible_shapes = False
-        for layer in document.layers:
-            if layer.visible:
-                for shape in layer.shapes:
-                    if shape.visible:
-                        has_visible_shapes = True
-                        break
-                if has_visible_shapes:
-                    break
-        
-        if not has_visible_shapes:
+        # Check if document has any visible shapes using get_design_bounds()
+        # This is more robust than manually checking paths
+        design_bounds = document.get_design_bounds()
+        if design_bounds is None:
+            # Provide more helpful error message
+            total_layers = len(document.layers)
+            total_shapes = sum(len(layer.shapes) for layer in document.layers)
+            visible_layers = sum(1 for layer in document.layers if layer.visible)
+            total_shapes_in_visible_layers = sum(len(layer.shapes) for layer in document.layers if layer.visible)
+            
             QMessageBox.information(
                 self,
                 "No Content",
-                "Document has no visible shapes to preview.\n\n"
-                "Make sure you have shapes in visible layers."
+                f"Document has no visible shapes to preview.\n\n"
+                f"Layers: {total_layers} total, {visible_layers} visible\n"
+                f"Shapes: {total_shapes} total, {total_shapes_in_visible_layers} in visible layers\n\n"
+                f"Make sure you have shapes in visible layers that can generate G-code."
             )
             return
         

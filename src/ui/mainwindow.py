@@ -79,7 +79,12 @@ class MainWindow(QMainWindow):
         self.controller_status_update.connect(self._on_controller_status)
         
         self.document = Document(name="Untitled")
-        self.document.add_layer(Layer(name="Layer 1"))
+        layer1 = Layer(name="Layer 1")
+        # Assign a unique color to the first layer
+        from PyQt6.QtGui import QColor
+        color = QColor.fromHsv(0, 200, 200)  # Red
+        layer1.color = color.name()
+        self.document.add_layer(layer1)
         from datetime import datetime
         self.document.created_at = datetime.now().isoformat()
         
@@ -165,6 +170,14 @@ class MainWindow(QMainWindow):
         self.action_select_all = QAction("Select &All", self)
         self.action_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
         self.action_select_all.triggered.connect(self._on_select_all)
+        
+        self.action_copy = QAction("&Copy", self)
+        self.action_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        self.action_copy.triggered.connect(self._on_copy)
+        
+        self.action_paste = QAction("&Paste", self)
+        self.action_paste.setShortcut(QKeySequence.StandardKey.Paste)
+        self.action_paste.triggered.connect(self._on_paste)
         
         # View actions
         self.action_zoom_in = QAction("Zoom &In", self)
@@ -382,6 +395,9 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.action_redo)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_delete)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_copy)
+        edit_menu.addAction(self.action_paste)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_select_all)
         edit_menu.addSeparator()
@@ -640,7 +656,7 @@ class MainWindow(QMainWindow):
             
             # Properties panel changes update canvas view
             self.properties_panel.property_changed.connect(
-                self.canvas._update_view
+                self.canvas._on_property_changed
             )
             
             # Properties panel image settings button opens dialog
@@ -656,6 +672,17 @@ class MainWindow(QMainWindow):
             # Canvas updates refresh layers panel
             self.canvas.selection_changed.connect(
                 lambda shapes: self.layers_panel.refresh()
+            )
+            
+            # Layer panel changes update canvas
+            self.layers_panel.layer_settings_changed.connect(
+                lambda layer: self.canvas._update_view()
+            )
+            self.layers_panel.layer_reordered.connect(
+                lambda: self.canvas._update_view()
+            )
+            self.layers_panel.shapes_moved_between_layers.connect(
+                lambda: self.canvas._update_view()
             )
             
             # Material selection updates laser settings
@@ -1059,6 +1086,14 @@ class MainWindow(QMainWindow):
     def _on_select_all(self):
         """Select all objects."""
         self.canvas.select_all()
+    
+    def _on_copy(self):
+        """Copy selected objects to clipboard."""
+        self.canvas.copy_selection()
+    
+    def _on_paste(self):
+        """Paste objects from clipboard."""
+        self.canvas.paste_selection()
     
     def _on_mirror_horizontal(self):
         """Mirror selected shapes horizontally."""

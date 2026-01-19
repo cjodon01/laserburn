@@ -766,6 +766,59 @@ class ImageShape(Shape):
     
     def get_bounding_box(self) -> BoundingBox:
         """Return bounding box from transformed paths (handles scale and rotation)."""
+        # If we have transparency, calculate bounding box based on non-transparent pixels only
+        if self.alpha_channel is not None and self.image_data is not None:
+            # Find bounding box of non-transparent pixels
+            # Alpha channel: 0 = fully transparent, 255 = fully opaque
+            opaque_mask = self.alpha_channel >= 128  # Consider >= 50% opacity as visible
+            
+            if not np.any(opaque_mask):
+                # All pixels are transparent - return empty bounding box
+                return BoundingBox(0, 0, 0, 0)
+            
+            # Find rows and columns with opaque pixels
+            rows_with_opaque = np.any(opaque_mask, axis=1)
+            cols_with_opaque = np.any(opaque_mask, axis=0)
+            
+            if not np.any(rows_with_opaque) or not np.any(cols_with_opaque):
+                return BoundingBox(0, 0, 0, 0)
+            
+            # Get pixel bounds
+            min_row = np.argmax(rows_with_opaque)
+            max_row = len(rows_with_opaque) - 1 - np.argmax(rows_with_opaque[::-1])
+            min_col = np.argmax(cols_with_opaque)
+            max_col = len(cols_with_opaque) - 1 - np.argmax(cols_with_opaque[::-1])
+            
+            # Convert pixel coordinates to mm coordinates
+            # Image is positioned at (x, y) and has size (width, height)
+            # Pixels are mapped from (0,0) to (width, height) in mm
+            mm_per_inch = 25.4
+            px_to_mm_x = (self.width / self.image_width_px) if self.image_width_px > 0 else 0
+            px_to_mm_y = (self.height / self.image_height_px) if self.image_height_px > 0 else 0
+            
+            # Calculate bounding box in local coordinates (before transform)
+            local_min_x = min_col * px_to_mm_x
+            local_max_x = (max_col + 1) * px_to_mm_x
+            local_min_y = min_row * px_to_mm_y
+            local_max_y = (max_row + 1) * px_to_mm_y
+            
+            # Create corner points and apply transform
+            corners = [
+                Point(local_min_x, local_min_y),
+                Point(local_max_x, local_min_y),
+                Point(local_max_x, local_max_y),
+                Point(local_min_x, local_max_y)
+            ]
+            transformed_corners = self.apply_transform(corners)
+            
+            return BoundingBox(
+                min_x=min(p.x for p in transformed_corners),
+                min_y=min(p.y for p in transformed_corners),
+                max_x=max(p.x for p in transformed_corners),
+                max_y=max(p.y for p in transformed_corners)
+            )
+        
+        # No transparency - use full rectangle
         paths = self.get_paths()
         all_points = [p for path in paths for p in path]
         if not all_points:

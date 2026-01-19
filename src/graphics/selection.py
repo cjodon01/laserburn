@@ -340,6 +340,10 @@ class SelectionManager(QObject):
             print(f"[SelectionManager] _on_handle_transform: No selected items, returning")
             return
         
+        # Check for Ctrl modifier to maintain aspect ratio
+        from PyQt6.QtWidgets import QApplication
+        maintain_aspect = QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier
+        
         if event_type == "start":
             # Start transform
             print(f"[SelectionManager] _on_handle_transform: Starting transform")
@@ -352,11 +356,12 @@ class SelectionManager(QObject):
         elif event_type == "update":
             # Update transform
             if self._active_handle == handle:
-                print(f"[SelectionManager] _on_handle_transform: Updating transform")
+                print(f"[SelectionManager] _on_handle_transform: Updating transform (maintain_aspect={maintain_aspect})")
                 result = self._transform_manager.update_transform(
                     selected_items,
                     pos,
-                    handle._handle_type
+                    handle._handle_type,
+                    maintain_aspect=maintain_aspect
                 )
                 print(f"[SelectionManager] _on_handle_transform: update_transform returned {result}")
             else:

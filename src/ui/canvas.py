@@ -14,7 +14,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QPainterPath,
-    QWheelEvent, QMouseEvent, QKeyEvent
+    QWheelEvent, QMouseEvent, QKeyEvent, QClipboard
 )
 from typing import List, Optional
 from enum import Enum
@@ -78,6 +78,7 @@ class LaserCanvas(QGraphicsView):
         self._temp_item: Optional[QGraphicsItem] = None
         self._selected_items: List[QGraphicsItem] = []
         self._active_layer: Optional[Layer] = None
+        self._clipboard_shapes: List[Shape] = []  # Shapes in clipboard
         
         # Selection manager
         self._selection_manager = SelectionManager(self.scene)
@@ -332,7 +333,16 @@ class LaserCanvas(QGraphicsView):
                     continue
                 
                 try:
-                    color = QColor(layer.color)
+                    # Use layer color for rendering
+                    try:
+                        color = QColor(layer.color)
+                    except:
+                        # Fallback to default colors if layer color is invalid
+                        # Generate a color based on layer index
+                        layer_index = self.document.layers.index(layer)
+                        hue = (layer_index * 137.5) % 360  # Golden angle for color distribution
+                        color = QColor.fromHsv(int(hue), 200, 200)
+                    
                     pen = QPen(color, 1)
                     pen.setCosmetic(True)  # Constant width regardless of zoom
                     
@@ -493,6 +503,10 @@ class LaserCanvas(QGraphicsView):
                 # Check if clicking on a shape item
                 if item and isinstance(item, ShapeGraphicsItem):
                     # Use SelectionManager to handle selection
+                    add_to_selection = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) != 0
+                    self._selection_manager.select_item(item, add_to_selection=add_to_selection)
+                elif item and isinstance(item, ImageGraphicsItem):
+                    # Use SelectionManager to handle image selection
                     add_to_selection = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) != 0
                     self._selection_manager.select_item(item, add_to_selection=add_to_selection)
                 else:
@@ -707,6 +721,10 @@ class LaserCanvas(QGraphicsView):
                 if shape:
                     selected_shapes.append(shape)
             elif isinstance(item, ShapeGraphicsItem):
+                shape = item.shape_ref
+                if shape:
+                    selected_shapes.append(shape)
+            elif isinstance(item, ImageGraphicsItem):
                 shape = item.shape_ref
                 if shape:
                     selected_shapes.append(shape)
@@ -1215,4 +1233,99 @@ class LaserCanvas(QGraphicsView):
             self.scene.removeItem(self._temp_item)
             self._temp_item = None
         self._is_drawing = False
+    
+    def copy_selection(self):
+        """Copy selected shapes to clipboard."""
+        selected_shapes = self.get_selected_shapes()
+        if not selected_shapes:
+            return
+        
+        # Store shapes in clipboard (deep copy)
+        import copy
+        self._clipboard_shapes = []
+        for shape in selected_shapes:
+            # Create a deep copy of the shape
+            copied_shape = copy.deepcopy(shape)
+            # Offset position slightly for paste
+            copied_shape.position.x += 10.0
+            copied_shape.position.y += 10.0
+            self._clipboard_shapes.append(copied_shape)
+    
+    def paste_selection(self):
+        """Paste shapes from clipboard."""
+        if not self._clipboard_shapes:
+            return
+        
+        # Ensure we have an active layer
+        if not self._active_layer:
+            if self.document.layers:
+                self._active_layer = self.document.layers[0]
+            else:
+                self._active_layer = Layer(name="Layer 1")
+                self.document.add_layer(self._active_layer)
+        
+        # Paste shapes into active layer
+        import copy
+        pasted_shapes = []
+        for shape in self._clipboard_shapes:
+            # Create a new copy (in case user wants to paste multiple times)
+            pasted_shape = copy.deepcopy(shape)
+            # Offset position for each paste
+            pasted_shape.position.x += 10.0
+            pasted_shape.position.y += 10.0
+            self._active_layer.add_shape(pasted_shape)
+            pasted_shapes.append(pasted_shape)
+        
+        # Update view and select pasted shapes
+        self._update_view()
+        
+        # Select the pasted shapes
+        self._selection_manager.clear_selection()
+        for item in self.scene.items():
+            shape = None
+            if hasattr(item, 'shape_ref'):
+                shape = item.shape_ref
+            elif hasattr(item, '_text_shape'):
+                shape = item._text_shape
+            else:
+                shape = item.data(0)
+            
+            if shape and shape in pasted_shapes:
+                self._selection_manager.select_item(item, add_to_selection=True)
+    
+    def _on_property_changed(self):
+        """Handle property changes - update graphics items immediately."""
+        from ..graphics.text_item import EditableTextItem
+        
+        # Get currently selected shapes
+        selected_shapes = self.get_selected_shapes()
+        
+        # Update graphics items for selected shapes immediately
+        for item in self.scene.items():
+            if isinstance(item, SelectionHandleItem):
+                continue
+            
+            shape = None
+            if isinstance(item, EditableTextItem):
+                shape = item._text_shape or item.data(0)
+            elif isinstance(item, ShapeGraphicsItem):
+                shape = item.shape_ref
+            elif isinstance(item, ImageGraphicsItem):
+                shape = item.shape_ref
+            else:
+                shape = item.data(0)
+            
+            # If this item's shape is selected, update it
+            if shape and shape in selected_shapes:
+                if isinstance(item, EditableTextItem):
+                    # Text items update themselves when shape changes
+                    item.set_text_shape(shape)
+                elif isinstance(item, ImageGraphicsItem):
+                    item.update_from_shape()
+                elif isinstance(item, ShapeGraphicsItem):
+                    item.update_from_shape()
+        
+        # Force scene update
+        self.scene.update()
+        self.viewport().update()
 

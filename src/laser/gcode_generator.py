@@ -420,15 +420,12 @@ class GCodeGenerator:
         # Process fill patterns
         if fill_paths:
             self._emit("; Fill patterns")
-            # Optimize fill path order if enabled
-            if self.settings.optimize_paths:
-                start = Point(self._current_x, self._current_y)
-                fill_paths = optimize_paths(fill_paths, start)
+            # Use M4 mode for fill patterns (like LightBurn) for efficient on/off control
+            self._emit("M4 ; Dynamic power mode for fill patterns")
             
-            # Cut each fill line
-            for i, fill_line in enumerate(fill_paths):
-                settings = fill_settings[min(i, len(fill_settings)-1)]
-                self._cut_path(fill_line, settings)
+            # Group fill lines by scanline (same Y coordinate) and combine segments
+            # This matches LightBurn's approach of combining segments on the same line
+            self._process_fill_patterns_optimized(fill_paths, fill_settings)
         
         self._emit("")
     
@@ -1006,14 +1003,24 @@ class GCodeGenerator:
             laser_point = self._canvas_to_laser(point, document_height, document_width)
             self._linear_move(laser_point.x, laser_point.y)
         
-        # Multiple passes
+        # Multiple passes - repeat the entire path for each additional pass
         if settings.passes > 1:
             for pass_num in range(1, settings.passes):
-                self._emit(f"; Pass {pass_num + 1}")
-                # Reverse direction for alternating passes
-                for point in reversed(path[:-1]):
-                    laser_point = self._canvas_to_laser(point, document_height, document_width)
-                    self._linear_move(laser_point.x, laser_point.y)
+                self._emit(f"; Pass {pass_num + 1} of {settings.passes}")
+                
+                # Turn laser off for rapid move back to start
+                self._laser_off()
+                
+                # Return to start point (rapid move with laser off)
+                laser_start = self._canvas_to_laser(start, document_height, document_width)
+                if laser_start.x != self._current_x or laser_start.y != self._current_y:
+                    self._rapid_move(laser_start.x, laser_start.y)
+                
+                # Turn laser back on for this pass
+                self._laser_on_with_power(power)
+                self._set_speed(speed)
+                
+                # Repeat the entire path forward
                 for point in path[1:]:
                     laser_point = self._canvas_to_laser(point, document_height, document_width)
                     self._linear_move(laser_point.x, laser_point.y)
@@ -1115,6 +1122,121 @@ class GCodeGenerator:
             self._emit("M5")
             self._laser_on = False
             self._current_power = 0
+    
+    def _process_fill_patterns_optimized(self, fill_paths: List[List[Point]], fill_settings: List[LaserSettings]):
+        """
+        Process fill patterns using M4 mode, combining segments on the same scanline.
+        This matches LightBurn's efficient approach.
+        """
+        if not fill_paths:
+            return
+        
+        # Ensure we're in relative mode (G91) for fill patterns like LightBurn
+        if not self._use_relative_mode:
+            self._emit("G91 ; Relative mode for fill patterns")
+            self._use_relative_mode = True
+        
+        # Get settings (assume all fill paths use similar settings)
+        settings = fill_settings[0] if fill_settings else LaserSettings()
+        power_percent = max(0.0, min(100.0, settings.power))
+        power = int(round((power_percent / 100.0) * self.settings.max_power))
+        power = max(0, min(self.settings.max_power, power))
+        speed = settings.speed * 60  # Convert mm/s to mm/min
+        
+        # Set feed rate once
+        self._emit(f"G1 F{speed:.0f} ; Set feed rate for fill patterns")
+        
+        # Transform coordinates helper
+        document_height = getattr(self, '_current_document_height', 400.0)
+        document_width = getattr(self, '_current_document_width', 400.0)
+        
+        # Group fill lines by Y coordinate (scanline) - use rounded Y for grouping
+        from collections import defaultdict
+        scanlines = defaultdict(list)
+        
+        for fill_line in fill_paths:
+            if len(fill_line) >= 2:
+                # Get Y coordinate (should be same for both points in horizontal fill)
+                # Round to avoid floating point precision issues
+                y_coord = round(fill_line[0].y, 3)
+                scanlines[y_coord].append(fill_line)
+        
+        # Sort scanlines by Y coordinate
+        sorted_scanlines = sorted(scanlines.items())
+        
+        # Move to first scanline start position (in absolute mode first)
+        if sorted_scanlines:
+            first_y, first_segments = sorted_scanlines[0]
+            first_seg = first_segments[0]
+            start_point = first_seg[0]  # Start from first point
+            laser_start = self._canvas_to_laser(start_point, document_height, document_width)
+            
+            # Switch to absolute mode for initial positioning
+            if self._use_relative_mode:
+                self._emit("G90 ; Absolute mode for initial positioning")
+                self._use_relative_mode = False
+            
+            # Rapid move to first scanline start
+            if abs(laser_start.x - self._current_x) > 0.001 or abs(laser_start.y - self._current_y) > 0.001:
+                self._emit(f"G0 X{laser_start.x:.3f} Y{laser_start.y:.3f} ; Move to first scanline")
+                self._current_x = laser_start.x
+                self._current_y = laser_start.y
+            
+            # Switch back to relative mode
+            self._emit("G91 ; Relative mode for fill scanlines")
+            self._use_relative_mode = True
+        
+        # Process each scanline
+        for scanline_index, (y_coord, segments) in enumerate(sorted_scanlines):
+            # Sort segments by X coordinate (left to right or right to left)
+            # Alternate direction for efficiency (like LightBurn)
+            reverse = (scanline_index % 2 == 1)
+            
+            # Sort segments by their start X coordinate
+            segments_sorted = sorted(segments, key=lambda s: s[0].x, reverse=reverse)
+            
+            # Process each segment on this scanline
+            for seg in segments_sorted:
+                if len(seg) < 2:
+                    continue
+                
+                p1, p2 = seg[0], seg[1]
+                if reverse:
+                    p1, p2 = p2, p1  # Reverse direction
+                
+                # Transform to laser coordinates
+                laser_p1 = self._canvas_to_laser(p1, document_height, document_width)
+                laser_p2 = self._canvas_to_laser(p2, document_height, document_width)
+                
+                # Move to segment start if needed (laser off, S0)
+                if abs(laser_p1.x - self._current_x) > 0.001 or abs(laser_p1.y - self._current_y) > 0.001:
+                    dx = laser_p1.x - self._current_x
+                    dy = laser_p1.y - self._current_y
+                    self._emit(f"G1 X{dx:.3f} Y{dy:.3f} S0 ; Move to segment start")
+                    self._current_x = laser_p1.x
+                    self._current_y = laser_p1.y
+                
+                # Engrave segment (laser on, S>0)
+                dx = laser_p2.x - self._current_x
+                dy = laser_p2.y - self._current_y
+                if abs(dx) > 0.001 or abs(dy) > 0.001:
+                    self._emit(f"G1 X{dx:.3f} Y{dy:.3f} S{power} ; Engrave segment")
+                    self._current_x = laser_p2.x
+                    self._current_y = laser_p2.y
+            
+            # Move to next scanline (laser off, no S value - keeps previous S0 state)
+            if scanline_index < len(sorted_scanlines) - 1:
+                next_y = sorted_scanlines[scanline_index + 1][0]
+                dy = next_y - y_coord
+                if abs(dy) > 0.001:
+                    self._emit(f"G1 Y{dy:.3f} ; Move to next scanline")
+                    self._current_y += dy
+        
+        # Restore M3 mode after fill patterns
+        self._emit("M5 ; Laser off")
+        self._emit("M3 ; Restore constant power mode")
+        self._laser_on = False
+        self._current_power = 0
     
     def _set_speed(self, speed: float):
         """Set feed rate."""

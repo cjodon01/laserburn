@@ -169,7 +169,7 @@ class TransformManager:
         print(f"[TRANSFORM] start_transform: Transform center=({self._transform_center.x():.2f}, {self._transform_center.y():.2f})")
     
     def update_transform(self, items: List[QGraphicsItem], current_pos: QPointF, 
-                        handle_type: str) -> bool:
+                        handle_type: str, maintain_aspect: bool = False) -> bool:
         """
         Update transformation based on handle movement.
         """
@@ -177,7 +177,7 @@ class TransformManager:
             return False
         
         if handle_type == "corner":
-            return self._update_scale_corner(items, current_pos)
+            return self._update_scale_corner(items, current_pos, maintain_aspect)
         elif handle_type == "edge":
             return self._update_scale_edge(items, current_pos)
         elif handle_type == "rotation":
@@ -185,7 +185,8 @@ class TransformManager:
         
         return False
     
-    def _update_scale_corner(self, items: List[QGraphicsItem], current_pos: QPointF) -> bool:
+    def _update_scale_corner(self, items: List[QGraphicsItem], current_pos: QPointF, 
+                            maintain_aspect: bool = False) -> bool:
         """Update scale transformation via corner handle."""
         if not self._transform_center or not self._transform_start_pos:
             print(f"[TRANSFORM] _update_scale_corner: Missing transform center or start pos")
@@ -212,6 +213,14 @@ class TransformManager:
         # Calculate TOTAL scale factor from original position
         total_scale_x = current_delta_x / start_delta_x
         total_scale_y = current_delta_y / start_delta_y
+        
+        # If maintaining aspect ratio, use the larger scale factor
+        if maintain_aspect:
+            # Use the scale factor with the larger magnitude
+            if abs(total_scale_x) > abs(total_scale_y):
+                total_scale_y = total_scale_x * (1 if total_scale_y >= 0 else -1)
+            else:
+                total_scale_x = total_scale_y * (1 if total_scale_x >= 0 else -1)
         
         print(f"[TRANSFORM] _update_scale_corner: raw scale=({total_scale_x:.3f}, {total_scale_y:.3f})")
         

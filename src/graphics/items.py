@@ -221,6 +221,9 @@ class ImageGraphicsItem(QGraphicsItem):
         
         # Set position - this is the only positioning, no transform for position
         self.setPos(image_shape.position.x, image_shape.position.y)
+        
+        # Apply initial transforms (scale and rotation)
+        self._apply_shape_transforms()
     
     def _update_pixmap(self):
         """Update the QPixmap from the image shape's data with adjustments applied."""
@@ -389,12 +392,11 @@ class ImageGraphicsItem(QGraphicsItem):
         self.update()
     
     def boundingRect(self) -> QRectF:
-        """Return the bounding rectangle (actual size including scale)."""
+        """Return the bounding rectangle (base size, scale/rotation handled by QTransform)."""
         if self._shape:
-            # Return ACTUAL size (base * scale) so handles appear at correct positions
-            actual_width = self._shape.width * abs(self._shape.scale_x)
-            actual_height = self._shape.height * abs(self._shape.scale_y)
-            return QRectF(0, 0, actual_width, actual_height)
+            # Return BASE size - scale and rotation are handled by QTransform
+            # This ensures Qt's transform system works correctly for handle positioning
+            return QRectF(0, 0, self._shape.width, self._shape.height)
         return QRectF(0, 0, 100, 100)
     
     def shape(self) -> QPainterPath:
@@ -408,32 +410,13 @@ class ImageGraphicsItem(QGraphicsItem):
         if not self._shape:
             return
         
-        import math
+        # Get base size (before scale)
+        base_width = self._shape.width
+        base_height = self._shape.height
+        rect = QRectF(0, 0, base_width, base_height)
         
-        # Get actual size
-        actual_width = self._shape.width * abs(self._shape.scale_x)
-        actual_height = self._shape.height * abs(self._shape.scale_y)
-        rect = QRectF(0, 0, actual_width, actual_height)
-        
-        # Save painter state
-        painter.save()
-        
-        # Apply rotation around center
-        if abs(self._shape.rotation) > 0.001:
-            center = rect.center()
-            painter.translate(center)
-            painter.rotate(math.degrees(self._shape.rotation))
-            painter.translate(-center)
-        
-        # Handle negative scale (mirroring)
-        if self._shape.scale_x < 0 or self._shape.scale_y < 0:
-            center = rect.center()
-            painter.translate(center)
-            painter.scale(
-                -1 if self._shape.scale_x < 0 else 1,
-                -1 if self._shape.scale_y < 0 else 1
-            )
-            painter.translate(-center)
+        # Note: Scale and rotation are now handled by QTransform (set in _apply_shape_transforms)
+        # So we just draw the base image at the base size
         
         # Draw image or placeholder
         if self._pixmap and not self._pixmap.isNull():
@@ -444,9 +427,8 @@ class ImageGraphicsItem(QGraphicsItem):
             painter.drawRect(rect)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Image")
         
-        painter.restore()
-        
-        # Draw selection/hover border (not rotated - around bounding box)
+        # Draw selection/hover border (around bounding box)
+        # The bounding box already accounts for scale/rotation via QTransform
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setPen(QPen(QColor(0, 120, 215), 2))
             painter.setBrush(QBrush())
@@ -475,12 +457,44 @@ class ImageGraphicsItem(QGraphicsItem):
         if self._shape:
             # Update position
             self.setPos(self._shape.position.x, self._shape.position.y)
+            
+            # Apply scale and rotation transforms (like EditableTextItem does)
+            # This ensures handles are positioned correctly
+            self._apply_shape_transforms()
         
         # Update pixmap (applies brightness/contrast/invert settings)
         self._update_pixmap()
         
         # Trigger repaint
         self.update()
+    
+    def _apply_shape_transforms(self):
+        """Apply scale and rotation from the shape to the graphics item using QTransform."""
+        if not self._shape:
+            return
+        
+        import math
+        from PyQt6.QtGui import QTransform
+        
+        # Get the item's bounding rect (untransformed) for center calculation
+        # Reset transform temporarily to get original bounds
+        old_transform = self.transform()
+        self.setTransform(QTransform())
+        bounds = self.boundingRect()
+        center_x = bounds.center().x()
+        center_y = bounds.center().y()
+        # Restore old transform
+        self.setTransform(old_transform)
+        
+        # Create transform: translate to center, rotate, scale, translate back
+        transform = QTransform()
+        transform.translate(center_x, center_y)
+        transform.rotate(math.degrees(self._shape.rotation))
+        transform.scale(self._shape.scale_x, self._shape.scale_y)
+        transform.translate(-center_x, -center_y)
+        
+        # Apply transform
+        self.setTransform(transform)
     
     @property
     def shape_ref(self) -> ImageShape:

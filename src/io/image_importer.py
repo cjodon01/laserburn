@@ -91,10 +91,22 @@ class ImageImporter:
             elif img.mode == 'LA':
                 alpha_channel = np.array(img.split()[1], dtype=np.uint8)  # Get alpha channel
                 has_transparency = np.any(alpha_channel < 255)
-            # Convert to RGB first, then to grayscale (preserving alpha separately)
+            
+            # Convert to grayscale without compositing onto white
+            # Extract RGB/grayscale data before conversion to preserve original colors
             if img.mode == 'RGBA':
-                img = img.convert('RGB')
+                # Get RGB channels and convert to grayscale manually
+                # This avoids PIL's default white background compositing
+                rgb_array = np.array(img)[:, :, :3]  # Get RGB channels (ignore alpha)
+                # Convert to grayscale using standard luminance weights
+                img_gray = (0.299 * rgb_array[:, :, 0] + 
+                           0.587 * rgb_array[:, :, 1] + 
+                           0.114 * rgb_array[:, :, 2]).astype(np.uint8)
+                # Note: We keep the grayscale values as-is (don't set transparent to 0)
+                # The alpha channel will mask these during G-code generation
+                img = Image.fromarray(img_gray, mode='L')
             else:
+                # LA mode - already grayscale with alpha, just extract L channel
                 img = img.convert('L')
         elif img.mode == 'P':
             # Palette mode - check for transparency
@@ -103,9 +115,19 @@ class ImageImporter:
                 img_rgba = img.convert('RGBA')
                 alpha_channel = np.array(img_rgba.split()[3], dtype=np.uint8)
                 has_transparency = np.any(alpha_channel < 255)
-                img = img_rgba.convert('RGB')
+                # Convert to grayscale without white background
+                rgb_array = np.array(img_rgba)[:, :, :3]
+                img_gray = (0.299 * rgb_array[:, :, 0] + 
+                           0.587 * rgb_array[:, :, 1] + 
+                           0.114 * rgb_array[:, :, 2]).astype(np.uint8)
+                if has_transparency:
+                    img_gray[alpha_channel < 128] = 0
+                img = Image.fromarray(img_gray, mode='L')
+            else:
+                # No transparency - convert normally
+                img = img.convert('RGB').convert('L')
         
-        # Convert to grayscale
+        # Convert to grayscale if not already
         if img.mode != 'L':
             img = img.convert('L')
         

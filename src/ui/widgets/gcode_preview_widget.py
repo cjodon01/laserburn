@@ -42,6 +42,7 @@ class GCodePreviewWidget(QWidget):
         
         try:
             print(f"Loading G-code file: {filepath}")
+            print("NOTE: S0 moves (laser off) will be filtered out - only S>0 moves will be shown")
             with open(filepath, 'r', encoding='utf-8') as f:
                 # For very large files, read in chunks
                 lines = f.readlines()
@@ -100,13 +101,26 @@ class GCodePreviewWidget(QWidget):
                     relative_mode = True
                 
                 # Check for laser on/off commands (M3 = on, M4 = dynamic mode, M5 = off)
-                if 'M3' in line or 'M03' in line or 'M4' in line or 'M04' in line:
+                if 'M3' in line or 'M03' in line:
+                    # M3 = constant power mode, laser is on
                     laser_on = True
                     # Extract S value if present
                     s_match = re.search(r'S(\d+)', line)
                     if s_match:
                         current_power = int(s_match.group(1))
                         laser_on = (current_power > 0)
+                elif 'M4' in line or 'M04' in line:
+                    # M4 = dynamic power mode, laser state depends on S value in each G1 move
+                    # Extract S value if present
+                    s_match = re.search(r'S(\d+)', line)
+                    if s_match:
+                        current_power = int(s_match.group(1))
+                        laser_on = (current_power > 0)
+                    else:
+                        # M4 without S value - laser state will be determined by S values in G1 moves
+                        # Don't assume laser is on - wait for first G1 move with S value
+                        laser_on = False
+                        current_power = 0
                 elif 'M5' in line or 'M05' in line:
                     laser_on = False
                     current_power = 0
@@ -134,21 +148,34 @@ class GCodePreviewWidget(QWidget):
                             y = y_val
                     
                     # Update laser state if S value is present in this line
+                    # This is critical for M4 mode where S value controls laser on/off per move
+                    # For M4 mode, every G1 line should have an S value
                     if s_match:
                         current_power = int(s_match.group(1))
-                        laser_on = (current_power > 0)
+                        laser_on = (current_power > 0)  # S0 = laser off, S>0 = laser on
+                    # Note: If no S value in G1 line, we keep previous state (shouldn't happen for M4 mode)
                     
-                    # Record engraving point if laser is on (for G1 moves)
-                    # G0 is rapid move (usually laser off), G1 is cutting move (usually laser on)
-                    if line.startswith('G1') and laser_on:
-                        point_count += 1
-                        # Sample points for very large files
-                        if point_count % sample_rate == 0:
-                            self._engraving_points.append((x, y))
-                            min_x = min(min_x, x)
-                            max_x = max(max_x, x)
-                            min_y = min(min_y, y)
-                            max_y = max(max_y, y)
+                    # Record engraving point ONLY if laser is on (S > 0)
+                    # G0 is rapid move (laser off), G1 is cutting move (may have laser on or off)
+                    # CRITICAL: Only record G1 moves where current_power > 0 (laser is actually on)
+                    # S0 moves must NEVER be recorded - they represent white/empty areas
+                    if line.startswith('G1'):
+                        # Explicitly check: only record if we have a positive power value
+                        # This ensures S0 moves are never recorded
+                        if current_power > 0 and laser_on:
+                            point_count += 1
+                            # Sample points for very large files
+                            if point_count % sample_rate == 0:
+                                self._engraving_points.append((x, y))
+                                min_x = min(min_x, x)
+                                max_x = max(max_x, x)
+                                min_y = min(min_y, y)
+                                max_y = max(max_y, y)
+                        # All other cases (S0, no S value, laser off) are explicitly NOT recorded
+                        # Debug: Track S0 moves to verify they're not being recorded
+                        elif s_match and current_power == 0:
+                            # This is an S0 move - explicitly skip it (do nothing)
+                            pass
                 
                 # Progress update for large files
                 if total_lines > 100000 and line_num % 100000 == 0:
@@ -162,6 +189,7 @@ class GCodePreviewWidget(QWidget):
                 actual_max_y = max(p[1] for p in self._engraving_points)
                 self._bounds = (actual_min_x, actual_max_x, actual_min_y, actual_max_y)
                 print(f"Found {len(self._engraving_points):,} points (sampled from {point_count:,} total)")
+                print(f"VERIFIED: Only S>0 moves were recorded - S0 moves were filtered out")
                 print(f"Calculated bounds: X[{actual_min_x:.2f}, {actual_max_x:.2f}] Y[{actual_min_y:.2f}, {actual_max_y:.2f}]")
                 
                 # Compare with expected bounds if available
@@ -230,37 +258,104 @@ class GCodePreviewWidget(QWidget):
         image = QImage(preview_width, preview_height, QImage.Format.Format_ARGB32)
         image.fill(QColor(43, 43, 43).rgb())  # Dark gray background
         
-        # Draw points
+        # Draw lines and points
         painter = QPainter(image)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Faster without antialiasing
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Disable antialiasing for sharper lines
         
-        # Use a brush for points - make sure they're visible
-        # Calculate point size based on scale - ensure minimum visibility
-        base_point_size = min(scale_x, scale_y)
-        # Point size should be at least 1 pixel per mm, but not too large
-        point_size = max(1, min(3, int(base_point_size * 0.5)))  # 0.5-3 pixels
-        painter.setPen(Qt.PenStyle.NoPen)
-        # Use bright red for better visibility
-        painter.setBrush(QColor(255, 50, 50, 255))  # Bright red for burn marks
+        # Detect if this is a dense fill pattern (many points in small area)
+        # If so, use thinner lines and possibly skip some lines to show pattern structure
+        total_points = len(self._engraving_points)
+        area_mm2 = width_mm * height_mm if width_mm > 0 and height_mm > 0 else 1.0
+        points_per_mm2 = total_points / area_mm2 if area_mm2 > 0 else 0
         
-        # Draw all points
-        points_drawn = 0
-        for x, y in self._engraving_points:
-            # Convert to image coordinates
-            img_x = int((x - min_x) * scale_x)
-            img_y = int((max_y - y) * scale_y)  # Flip Y
+        # Use thinner lines for dense patterns to show structure
+        base_line_width = min(scale_x, scale_y)
+        if points_per_mm2 > 100:  # Very dense pattern (like image scanlines)
+            line_width = 1  # Single pixel for dense patterns
+            line_skip = max(1, int(points_per_mm2 / 50))  # Skip some lines to show pattern
+        else:
+            line_width = max(1, min(2, int(base_line_width * 0.3)))  # 1-2 pixels for normal patterns
+            line_skip = 1  # Don't skip lines for sparse patterns
+        
+        painter.setPen(QPen(QColor(255, 50, 50, 255), line_width))  # Bright red for burn marks
+        painter.setBrush(QBrush())  # No fill for lines
+        
+        # Draw lines between consecutive points
+        # This will properly show fill patterns as filled areas
+        lines_drawn = 0
+        line_index = 0
+        if len(self._engraving_points) > 1:
+            prev_x, prev_y = self._engraving_points[0]
+            prev_img_x = int((prev_x - min_x) * scale_x)
+            prev_img_y = int((max_y - prev_y) * scale_y)  # Flip Y
             
-            # Draw point if in bounds
-            if 0 <= img_x < preview_width and 0 <= img_y < preview_height:
-                painter.drawEllipse(img_x - point_size // 2, img_y - point_size // 2, 
-                                   point_size, point_size)
-                points_drawn += 1
+            for x, y in self._engraving_points[1:]:
+                line_index += 1
+                
+                # Convert to image coordinates
+                img_x = int((x - min_x) * scale_x)
+                img_y = int((max_y - y) * scale_y)  # Flip Y
+                
+                # Skip lines for very dense patterns to show structure
+                if line_index % line_skip != 0:
+                    # Still update previous position for next line
+                    prev_img_x = img_x
+                    prev_img_y = img_y
+                    continue
+                
+                # Draw line if both points are in bounds (or at least one is)
+                if (0 <= img_x < preview_width and 0 <= img_y < preview_height) or \
+                   (0 <= prev_img_x < preview_width and 0 <= prev_img_y < preview_height):
+                    # Clip line to bounds if needed
+                    painter.drawLine(prev_img_x, prev_img_y, img_x, img_y)
+                    lines_drawn += 1
+                
+                prev_img_x = img_x
+                prev_img_y = img_y
+        
+        # For very dense patterns, also draw a sample of points to show the pattern
+        if points_per_mm2 > 100:
+            point_size = 1  # Single pixel for dense patterns
+            point_skip = max(1, int(total_points / 10000))  # Sample points for preview
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 50, 50, 180))  # Slightly transparent red
+            
+            points_drawn = 0
+            for i, (x, y) in enumerate(self._engraving_points):
+                if i % point_skip != 0:
+                    continue
+                # Convert to image coordinates
+                img_x = int((x - min_x) * scale_x)
+                img_y = int((max_y - y) * scale_y)  # Flip Y
+                
+                # Draw point if in bounds
+                if 0 <= img_x < preview_width and 0 <= img_y < preview_height:
+                    painter.drawEllipse(img_x - point_size // 2, img_y - point_size // 2, 
+                                     point_size, point_size)
+                    points_drawn += 1
+        else:
+            # For sparse patterns, draw all points
+            point_size = max(1, min(2, int(min(scale_x, scale_y) * 0.2)))  # Smaller points
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 50, 50, 200))  # Slightly transparent red
+            
+            points_drawn = 0
+            for x, y in self._engraving_points:
+                # Convert to image coordinates
+                img_x = int((x - min_x) * scale_x)
+                img_y = int((max_y - y) * scale_y)  # Flip Y
+                
+                # Draw point if in bounds
+                if 0 <= img_x < preview_width and 0 <= img_y < preview_height:
+                    painter.drawEllipse(img_x - point_size // 2, img_y - point_size // 2, 
+                                     point_size, point_size)
+                    points_drawn += 1
         
         painter.end()
         
         # Convert to pixmap
         self._preview_pixmap = QPixmap.fromImage(image)
-        print(f"Generated preview pixmap: {preview_width}x{preview_height}, drew {points_drawn:,} points (point_size={point_size})")
+        print(f"Generated preview pixmap: {preview_width}x{preview_height}, drew {lines_drawn:,} lines and {points_drawn:,} points (line_width={line_width})")
     
     def _fit_to_view(self):
         """Calculate scale and offset to fit engraving in view."""
@@ -342,11 +437,33 @@ class GCodePreviewWidget(QWidget):
                 target_rect = QRectF(screen_x, screen_y, screen_w, screen_h)
                 painter.drawPixmap(target_rect, self._preview_pixmap, source_rect)
         else:
-            # Fallback: draw points individually (slower, for small files)
-            painter.setPen(QPen(QColor(255, 100, 100), 1))  # Red for burn marks
-            painter.setBrush(QBrush(QColor(255, 100, 100, 180)))  # Semi-transparent red
+            # Fallback: draw lines and points individually (slower, for small files)
+            # Draw lines between consecutive points to show fill patterns properly
+            painter.setPen(QPen(QColor(255, 100, 100), max(1.0, self._scale * 0.2)))  # Red for burn marks
+            painter.setBrush(QBrush())  # No fill for lines
             
-            point_size = max(1.0, self._scale * 0.1)  # Scale point size with zoom
+            if len(self._engraving_points) > 1:
+                prev_x, prev_y = self._engraving_points[0]
+                prev_screen_x = prev_x * self._scale + self._offset_x
+                prev_screen_y = -prev_y * self._scale + self._offset_y
+                
+                for x, y in self._engraving_points[1:]:
+                    screen_x = x * self._scale + self._offset_x
+                    screen_y = -y * self._scale + self._offset_y
+                    
+                    # Draw line if at least one point is in viewport
+                    if (0 <= screen_x <= self.width() and 0 <= screen_y <= self.height()) or \
+                       (0 <= prev_screen_x <= self.width() and 0 <= prev_screen_y <= self.height()):
+                        painter.drawLine(QPointF(prev_screen_x, prev_screen_y), 
+                                       QPointF(screen_x, screen_y))
+                    
+                    prev_screen_x = screen_x
+                    prev_screen_y = screen_y
+            
+            # Also draw points for very sparse patterns
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 100, 100, 180)))  # Semi-transparent red
+            point_size = max(0.5, self._scale * 0.05)  # Smaller points
             
             for x, y in self._engraving_points:
                 screen_x = x * self._scale + self._offset_x

@@ -54,8 +54,16 @@ class LayersPanel(QWidget):
         btn_add.clicked.connect(self._add_layer)
         btn_remove = QPushButton("Remove Layer")
         btn_remove.clicked.connect(self._remove_layer)
+        btn_up = QPushButton("↑")
+        btn_up.setToolTip("Move layer up")
+        btn_up.clicked.connect(self._move_layer_up)
+        btn_down = QPushButton("↓")
+        btn_down.setToolTip("Move layer down")
+        btn_down.clicked.connect(self._move_layer_down)
         btn_layout.addWidget(btn_add)
         btn_layout.addWidget(btn_remove)
+        btn_layout.addWidget(btn_up)
+        btn_layout.addWidget(btn_down)
         layers_layout.addLayout(btn_layout)
         
         layers_group.setLayout(layers_layout)
@@ -318,3 +326,45 @@ class LayersPanel(QWidget):
                 self._selected_layer = None
                 self._set_settings_enabled(False)
                 self.refresh()
+    
+    def _move_layer_up(self):
+        """Move selected layer up in the list."""
+        current = self.layer_tree.currentItem()
+        if not current:
+            return
+        
+        layer = current.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(layer, Layer):
+            idx = self.document.layers.index(layer)
+            if idx > 0:
+                # Swap with layer above
+                self.document.layers[idx], self.document.layers[idx - 1] = \
+                    self.document.layers[idx - 1], self.document.layers[idx]
+                self.refresh()
+                # Reselect the moved layer
+                for i in range(self.layer_tree.topLevelItemCount()):
+                    item = self.layer_tree.topLevelItem(i)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == layer:
+                        self.layer_tree.setCurrentItem(item)
+                        break
+    
+    def _move_layer_down(self):
+        """Move selected layer down in the list."""
+        current = self.layer_tree.currentItem()
+        if not current:
+            return
+        
+        layer = current.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(layer, Layer):
+            idx = self.document.layers.index(layer)
+            if idx < len(self.document.layers) - 1:
+                # Swap with layer below
+                self.document.layers[idx], self.document.layers[idx + 1] = \
+                    self.document.layers[idx + 1], self.document.layers[idx]
+                self.refresh()
+                # Reselect the moved layer
+                for i in range(self.layer_tree.topLevelItemCount()):
+                    item = self.layer_tree.topLevelItem(i)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == layer:
+                        self.layer_tree.setCurrentItem(item)
+                        break

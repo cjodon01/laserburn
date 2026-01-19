@@ -195,11 +195,17 @@ class SVGParser:
         
         # Check if path should be closed based on fill attribute
         # For laser cutting, we typically want closed paths for filled shapes
+        # BUT: Only close if the path isn't already closed (has Z command)
         fill = self._get_style_value(element, 'fill', 'none')
         
+        # Check if path already ends with Z (closed command)
+        d_stripped = d.strip()
+        is_already_closed = d_stripped.upper().endswith('Z')
+        
         # If fill is not 'none', ensure path is closed (for outline cutting)
+        # But don't close if it's already closed
         if fill and fill.lower() not in ('none', 'transparent', ''):
-            if not path.closed and path.segments:
+            if not path.closed and not is_already_closed and path.segments:
                 # Close the path to create a proper outline
                 path.close()
         

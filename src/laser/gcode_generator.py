@@ -1262,7 +1262,8 @@ class GCodeGenerator:
     def _process_fill_patterns_optimized(self, fill_paths: List[List[Point]], fill_settings: List[LaserSettings]):
         """
         Process fill patterns using M4 mode, combining segments on the same scanline.
-        This matches LightBurn's efficient approach.
+        Uses bidirectional scanning for optimal performance - alternates left-to-right
+        and right-to-left on each scanline to minimize travel time.
         """
         if not fill_paths:
             return
@@ -1308,8 +1309,9 @@ class GCodeGenerator:
         # Move to first scanline start position (in absolute mode first)
         if sorted_scanlines:
             first_y, first_segments = sorted_scanlines[0]
-            first_seg = first_segments[0]
-            start_point = first_seg[0]  # Start from first point
+            # For first scanline (forward direction), start at leftmost segment
+            first_seg = min(first_segments, key=lambda s: s[0].x)
+            start_point = first_seg[0]  # Start from leftmost point
             laser_start = self._canvas_to_laser(start_point, document_height, document_width)
             
             # Switch to absolute mode for initial positioning
@@ -1327,29 +1329,58 @@ class GCodeGenerator:
             self._emit("G91 ; Relative mode for fill scanlines")
             self._use_relative_mode = True
         
-        # Process each scanline
+        # Process each scanline with bidirectional scanning
         for scanline_index, (y_coord, segments) in enumerate(sorted_scanlines):
-            # Sort segments by X coordinate (left to right or right to left)
-            # Alternate direction for efficiency (like LightBurn)
+            # Determine scan direction: alternate between forward (left-to-right) and reverse (right-to-left)
             reverse = (scanline_index % 2 == 1)
             
-            # Sort segments by their start X coordinate
+            # Sort segments by X coordinate based on direction
+            # For forward: left to right (ascending X)
+            # For reverse: right to left (descending X)
             segments_sorted = sorted(segments, key=lambda s: s[0].x, reverse=reverse)
             
-            # Process each segment on this scanline
+            # If this is not the first scanline, we need to position to the start of this scanline
+            # For forward scans: position to leftmost segment
+            # For reverse scans: position to rightmost segment
+            if scanline_index > 0 and segments_sorted:
+                if reverse:
+                    # Reverse scan: start at rightmost segment
+                    target_seg = segments_sorted[0]  # Already sorted descending
+                    target_point = target_seg[1] if len(target_seg) >= 2 else target_seg[0]  # End point (rightmost)
+                else:
+                    # Forward scan: start at leftmost segment
+                    target_seg = segments_sorted[0]  # Already sorted ascending
+                    target_point = target_seg[0]  # Start point (leftmost)
+                
+                laser_target = self._canvas_to_laser(target_point, document_height, document_width)
+                
+                # Calculate movement needed (in relative mode)
+                dx = laser_target.x - self._current_x
+                dy = laser_target.y - self._current_y
+                
+                # Only emit movement if significant
+                if abs(dx) > 0.001 or abs(dy) > 0.001:
+                    # Move with laser off (S0)
+                    self._emit(f"G1 X{dx:.3f} Y{dy:.3f} S0 ; Move to scanline start")
+                    self._current_x = laser_target.x
+                    self._current_y = laser_target.y
+            
+            # Process all segments on this scanline in the determined direction
             for seg in segments_sorted:
                 if len(seg) < 2:
                     continue
                 
                 p1, p2 = seg[0], seg[1]
+                # For reverse scans, swap start and end to engrave in reverse direction
                 if reverse:
-                    p1, p2 = p2, p1  # Reverse direction
+                    p1, p2 = p2, p1
                 
                 # Transform to laser coordinates
                 laser_p1 = self._canvas_to_laser(p1, document_height, document_width)
                 laser_p2 = self._canvas_to_laser(p2, document_height, document_width)
                 
                 # Move to segment start if needed (laser off, S0)
+                # This handles gaps between segments on the same scanline
                 if abs(laser_p1.x - self._current_x) > 0.001 or abs(laser_p1.y - self._current_y) > 0.001:
                     dx = laser_p1.x - self._current_x
                     dy = laser_p1.y - self._current_y
@@ -1365,7 +1396,9 @@ class GCodeGenerator:
                     self._current_x = laser_p2.x
                     self._current_y = laser_p2.y
             
-            # Move to next scanline (laser off, no S value - keeps previous S0 state)
+            # Move to next scanline (Y movement only, laser off)
+            # After processing a scanline, we're at the end of that scanline
+            # The next scanline will position X appropriately based on direction
             if scanline_index < len(sorted_scanlines) - 1:
                 next_y_canvas = sorted_scanlines[scanline_index + 1][0]
                 current_y_canvas = y_coord

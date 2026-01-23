@@ -22,20 +22,52 @@ The LaserBurn application has been successfully built, tested, and is ready for 
 3. **Drawing Tools**
    - Rectangle tool (press `R`, click and drag)
    - Ellipse tool (press `E`, click and drag)
+   - Line tool (press `L`)
+   - Polygon tool (press `P`)
+   - Pen tool (press `N` for freehand drawing)
+   - Text tool (press `T` with font selection)
    - Select tool (press `V`)
+   - Transform tools (scale, rotate, mirror with interactive handles)
    - Shape deletion (Delete key)
 
 4. **File Operations**
-   - SVG import (File > Import)
-   - SVG export (via code)
+   - SVG import (File > Import) - Full path command support
+   - Image import (PNG, JPG, GIF, BMP) with dithering
+   - SVG export
+   - Native project format (.lbrn) - Save and load complete projects
    - G-code export (File > Export G-Code)
 
 5. **G-Code Generation**
    - Complete G-code generator
-   - GRBL-compatible output
-   - Configurable settings
+   - GRBL-compatible output (fully operational controller support)
+   - Configurable settings (power, speed, passes, fill patterns)
+   - **Path optimization**: TSP approximation for reduced travel time
+   - **Bidirectional scanning**: Optimized fill patterns and image engraving
    - **Optimized output**: Uses G1 S0 for white space (matching LightBurn) for better controller compatibility
    - **Intelligent filtering**: Automatically skips tiny moves (< 0.05mm) to reduce file size
+   - **Fill patterns**: Horizontal, vertical, crosshatch, diagonal with even-odd fill rule
+
+6. **Laser Control**
+   - GRBL controller integration (fully operational)
+   - Serial communication with flow control
+   - Real-time status monitoring
+   - Job queue management
+   - Jog functionality
+   - Home and set home position
+   - Auto-detection of work area and max power
+
+7. **Image Processing**
+   - Multiple dithering algorithms (Floyd-Steinberg, Jarvis, Stucki, Atkinson, Bayer)
+   - Brightness/contrast adjustment
+   - Image inversion
+   - Variable DPI engraving
+   - Transparency support
+
+8. **Special Features**
+   - Cylinder engraving with automatic power compensation
+   - G-code preview widget
+   - Frame function (outline design perimeter)
+   - Job time estimation
 
 ## 🧪 Testing Results
 

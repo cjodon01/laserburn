@@ -21,7 +21,7 @@ from enum import Enum
 
 from ..core.document import Document
 from ..core.layer import Layer
-from ..core.shapes import Shape, Point, Rectangle, Ellipse, Path, Text, ImageShape
+from ..core.shapes import Shape, Point, Rectangle, Ellipse, Path, Text, ImageShape, BoundingBox
 from ..graphics import (
     ShapeGraphicsItem, SelectionManager, ImageGraphicsItem,
     ToolType, create_tool, DrawingTool, PolygonTool
@@ -1367,4 +1367,323 @@ class LaserCanvas(QGraphicsView):
         # Force scene update
         self.scene.update()
         self.viewport().update()
+    
+    def create_array(self, rows: int, columns: int, x_spacing: float, y_spacing: float):
+        """
+        Create an array of selected shapes.
+        
+        Args:
+            rows: Number of rows
+            columns: Number of columns
+            x_spacing: Spacing between columns (mm)
+            y_spacing: Spacing between rows (mm)
+        """
+        from uuid import uuid4
+        import copy
+        
+        # Get all selected shapes grouped by layer (use list of tuples since Layer is not hashable)
+        selected_shapes_by_layer = []
+        for layer in self.document.layers:
+            layer_shapes = []
+            for shape in layer.shapes:
+                if shape in self.get_selected_shapes():
+                    layer_shapes.append(shape)
+            if layer_shapes:
+                selected_shapes_by_layer.append((layer, layer_shapes))
+        
+        if not selected_shapes_by_layer:
+            return
+        
+        # Calculate bounding box of all selected shapes to determine base position
+        all_selected = self.get_selected_shapes()
+        if not all_selected:
+            return
+        
+        # Get overall bounding box
+        bounds = all_selected[0].get_bounding_box()
+        for shape in all_selected[1:]:
+            shape_bounds = shape.get_bounding_box()
+            bounds = BoundingBox(
+                min_x=min(bounds.min_x, shape_bounds.min_x),
+                min_y=min(bounds.min_y, shape_bounds.min_y),
+                max_x=max(bounds.max_x, shape_bounds.max_x),
+                max_y=max(bounds.max_y, shape_bounds.max_y)
+            )
+        
+        # Base offset (top-left of selection)
+        base_x = bounds.min_x
+        base_y = bounds.min_y
+        
+        # Calculate the width and height of the selection bounding box
+        selection_width = bounds.max_x - bounds.min_x
+        selection_height = bounds.max_y - bounds.min_y
+        
+        # Create array copies
+        arrayed_shapes = []
+        for row in range(rows):
+            for col in range(columns):
+                # Skip the original (row 0, col 0)
+                if row == 0 and col == 0:
+                    continue
+                
+                # Calculate offset for this position
+                # Spacing is from the END of the previous item, not the start
+                # So column 1 should be at: base_x + selection_width + x_spacing
+                # Column 2 should be at: base_x + selection_width + x_spacing + selection_width + x_spacing
+                # Which simplifies to: base_x + col * (selection_width + x_spacing)
+                offset_x = col * (selection_width + x_spacing)
+                offset_y = row * (selection_height + y_spacing)
+                
+                # Copy shapes for each layer
+                for layer, shapes in selected_shapes_by_layer:
+                    for shape in shapes:
+                        # Create deep copy
+                        copied_shape = copy.deepcopy(shape)
+                        # Generate new ID
+                        copied_shape.id = uuid4()
+                        
+                        # Calculate new position
+                        # Get shape's position relative to base
+                        shape_bounds = shape.get_bounding_box()
+                        relative_x = shape_bounds.min_x - base_x
+                        relative_y = shape_bounds.min_y - base_y
+                        
+                        # Apply offset
+                        new_x = base_x + relative_x + offset_x
+                        new_y = base_y + relative_y + offset_y
+                        
+                        # Update shape position
+                        # Need to adjust position based on shape type
+                        if hasattr(copied_shape, 'width') and hasattr(copied_shape, 'height'):
+                            # Rectangle or ImageShape - position is top-left
+                            copied_shape.position.x = new_x
+                            copied_shape.position.y = new_y
+                        elif hasattr(copied_shape, 'radius_x') and hasattr(copied_shape, 'radius_y'):
+                            # Ellipse - position is center
+                            # Get original center position
+                            orig_center_x = shape.position.x
+                            orig_center_y = shape.position.y
+                            # Calculate relative to base
+                            orig_center_relative_x = orig_center_x - base_x
+                            orig_center_relative_y = orig_center_y - base_y
+                            # New center position
+                            new_center_x = base_x + orig_center_relative_x + offset_x
+                            new_center_y = base_y + orig_center_relative_y + offset_y
+                            copied_shape.position.x = new_center_x
+                            copied_shape.position.y = new_center_y
+                        else:
+                            # Other shapes - calculate offset from original position
+                            orig_pos_x = shape.position.x
+                            orig_pos_y = shape.position.y
+                            # Get original bounding box to find offset from position to min
+                            orig_bounds = shape.get_bounding_box()
+                            offset_from_pos_x = orig_bounds.min_x - orig_pos_x
+                            offset_from_pos_y = orig_bounds.min_y - orig_pos_y
+                            # New position
+                            copied_shape.position.x = new_x - offset_from_pos_x
+                            copied_shape.position.y = new_y - offset_from_pos_y
+                        
+                        # Add to layer
+                        layer.add_shape(copied_shape)
+                        arrayed_shapes.append(copied_shape)
+        
+        # Update view
+        self._update_view()
+        
+        # Select all arrayed shapes
+        self._selection_manager.clear_selection()
+        for item in self.scene.items():
+            shape = None
+            if hasattr(item, 'shape_ref'):
+                shape = item.shape_ref
+            elif hasattr(item, '_text_shape'):
+                shape = item._text_shape
+            else:
+                shape = item.data(0)
+            
+            if shape and shape in arrayed_shapes:
+                self._selection_manager.select_item(item, add_to_selection=True)
+    
+    def align_shapes(self, alignment: str):
+        """
+        Align selected shapes relative to each other.
+        
+        Args:
+            alignment: One of 'left', 'right', 'top', 'bottom', 
+                      'center_h', 'center_v', 'center_both'
+        """
+        selected_shapes = self.get_selected_shapes()
+        if len(selected_shapes) < 2:
+            return
+        
+        # Calculate bounding box of all selected shapes
+        bounds = selected_shapes[0].get_bounding_box()
+        for shape in selected_shapes[1:]:
+            shape_bounds = shape.get_bounding_box()
+            bounds = BoundingBox(
+                min_x=min(bounds.min_x, shape_bounds.min_x),
+                min_y=min(bounds.min_y, shape_bounds.min_y),
+                max_x=max(bounds.max_x, shape_bounds.max_x),
+                max_y=max(bounds.max_y, shape_bounds.max_y)
+            )
+        
+        # Calculate target positions
+        if alignment == 'left':
+            target_x = bounds.min_x
+        elif alignment == 'right':
+            target_x = bounds.max_x
+        elif alignment == 'top':
+            target_y = bounds.min_y
+        elif alignment == 'bottom':
+            target_y = bounds.max_y
+        elif alignment == 'center_h':
+            target_x = (bounds.min_x + bounds.max_x) / 2
+        elif alignment == 'center_v':
+            target_y = (bounds.min_y + bounds.max_y) / 2
+        elif alignment == 'center_both':
+            target_x = (bounds.min_x + bounds.max_x) / 2
+            target_y = (bounds.min_y + bounds.max_y) / 2
+        else:
+            return
+        
+        # Align each shape
+        for shape in selected_shapes:
+            shape_bounds = shape.get_bounding_box()
+            
+            if alignment in ('left', 'right', 'center_h', 'center_both'):
+                # Horizontal alignment
+                if alignment == 'left':
+                    target_edge_x = target_x
+                    # Calculate current edge position based on shape type
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        # Rectangle or ImageShape - position is top-left
+                        current_edge_x = shape_bounds.min_x
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        # Ellipse - position is center, need to calculate left edge
+                        current_edge_x = shape_bounds.min_x
+                    else:
+                        # Other shapes - use bounding box min
+                        current_edge_x = shape_bounds.min_x
+                    offset_x = target_edge_x - current_edge_x
+                elif alignment == 'right':
+                    target_edge_x = target_x
+                    # Calculate current edge position
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        current_edge_x = shape_bounds.max_x
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        current_edge_x = shape_bounds.max_x
+                    else:
+                        current_edge_x = shape_bounds.max_x
+                    offset_x = target_edge_x - current_edge_x
+                else:  # center_h or center_both
+                    target_center_x = target_x
+                    # Calculate current center
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        # Rectangle or ImageShape - center is position + width/2, height/2
+                        current_center_x = shape_bounds.min_x + (shape_bounds.max_x - shape_bounds.min_x) / 2
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        # Ellipse - position IS the center
+                        current_center_x = shape.position.x
+                    else:
+                        # Other shapes - use bounding box center
+                        current_center_x = (shape_bounds.min_x + shape_bounds.max_x) / 2
+                    offset_x = target_center_x - current_center_x
+                
+                # Apply offset based on shape type
+                if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                    # Rectangle or ImageShape - position is top-left
+                    shape.position.x += offset_x
+                elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                    # Ellipse - position is center
+                    shape.position.x += offset_x
+                else:
+                    # Other shapes - adjust position
+                    shape.position.x += offset_x
+            
+            if alignment in ('top', 'bottom', 'center_v', 'center_both'):
+                # Vertical alignment
+                if alignment == 'top':
+                    target_edge_y = target_y
+                    # Calculate current edge position
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        current_edge_y = shape_bounds.min_y
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        current_edge_y = shape_bounds.min_y
+                    else:
+                        current_edge_y = shape_bounds.min_y
+                    offset_y = target_edge_y - current_edge_y
+                elif alignment == 'bottom':
+                    target_edge_y = target_y
+                    # Calculate current edge position
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        current_edge_y = shape_bounds.max_y
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        current_edge_y = shape_bounds.max_y
+                    else:
+                        current_edge_y = shape_bounds.max_y
+                    offset_y = target_edge_y - current_edge_y
+                else:  # center_v or center_both
+                    target_center_y = target_y
+                    # Calculate current center
+                    if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                        current_center_y = shape_bounds.min_y + (shape_bounds.max_y - shape_bounds.min_y) / 2
+                    elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                        # Ellipse - position IS the center
+                        current_center_y = shape.position.y
+                    else:
+                        # Other shapes - use bounding box center
+                        current_center_y = (shape_bounds.min_y + shape_bounds.max_y) / 2
+                    offset_y = target_center_y - current_center_y
+                
+                # Apply offset based on shape type
+                if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                    # Rectangle or ImageShape - position is top-left
+                    shape.position.y += offset_y
+                elif hasattr(shape, 'radius_x') and hasattr(shape, 'radius_y'):
+                    # Ellipse - position is center
+                    shape.position.y += offset_y
+                else:
+                    # Other shapes - adjust position
+                    shape.position.y += offset_y
+            
+            # Invalidate cache if needed
+            if hasattr(shape, 'invalidate_cache'):
+                shape.invalidate_cache()
+            
+            # Update graphics item for this shape
+            from ..graphics.text_item import EditableTextItem
+            for item in self.scene.items():
+                if isinstance(item, SelectionHandleItem):
+                    continue
+                
+                item_shape = None
+                if isinstance(item, EditableTextItem):
+                    item_shape = item._text_shape or item.data(0)
+                elif isinstance(item, ShapeGraphicsItem):
+                    item_shape = item.shape_ref
+                elif isinstance(item, ImageGraphicsItem):
+                    item_shape = item.shape_ref
+                else:
+                    item_shape = item.data(0)
+                
+                if item_shape and item_shape.id == shape.id:
+                    # Found the graphics item for this shape - update it
+                    if isinstance(item, EditableTextItem):
+                        item.setPos(shape.position.x, shape.position.y)
+                        if hasattr(item, '_apply_shape_transforms'):
+                            item._apply_shape_transforms()
+                    elif isinstance(item, ImageGraphicsItem):
+                        item.update_from_shape()
+                    elif isinstance(item, ShapeGraphicsItem):
+                        item.update_from_shape()
+                    else:
+                        if hasattr(item, 'setPos'):
+                            item.setPos(shape.position.x, shape.position.y)
+                    break
+        
+        # Update view
+        self._update_view()
+        
+        # Update selection handles
+        self._selection_manager._update_handles()
 

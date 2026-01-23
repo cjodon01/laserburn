@@ -6,6 +6,13 @@ LaserBurn is now ready for use! This is the first functional release with core f
 
 ## 🔄 Recent Updates (2026-01-13)
 
+### Performance Optimization: Bidirectional Scanning
+- **Faster Engraving**: Implemented bidirectional scanning for SVG fill patterns and image engraving
+  - Alternates left-to-right and right-to-left on each scanline
+  - Eliminates unnecessary returns to start of each line
+  - Significantly reduces engraving time, especially for wide designs
+  - Maintains full functionality while improving performance
+
 ### G-Code Optimization Improvements
 - **Better Controller Compatibility**: Changed white space handling from G0 (rapid moves) to G1 S0 (feed rate with laser off) to match LightBurn's approach, ensuring better compatibility with various GRBL controllers
 - **Reduced File Size**: Added intelligent move filtering that automatically skips very small moves (< 0.05mm), significantly reducing G-code file size without noticeable quality impact
@@ -14,13 +21,15 @@ LaserBurn is now ready for use! This is the first functional release with core f
 ## ✅ What's Working
 
 ### Core Features
-- ✅ **Shape Creation**: Create rectangles and ellipses by drawing on the canvas
-- ✅ **Shape Selection**: Click to select shapes, delete with Delete key
-- ✅ **SVG Import**: Import SVG files with basic shape support
-- ✅ **G-Code Export**: Export designs to G-code for laser cutters
-- ✅ **Layer Management**: Organize shapes into layers
+- ✅ **Shape Creation**: Create rectangles, ellipses, lines, polygons, text, and freehand drawings
+- ✅ **Shape Selection**: Click to select shapes, delete with Delete key, transform with handles
+- ✅ **SVG Import**: Import SVG files with full path command support (all commands: M, L, H, V, C, S, Q, T, A, Z)
+- ✅ **Image Import**: Import PNG, JPG, GIF, BMP with dithering and processing options
+- ✅ **G-Code Export**: Export designs to G-code with path optimization and bidirectional scanning
+- ✅ **Layer Management**: Organize shapes into layers with individual laser settings
 - ✅ **Zoom & Pan**: Navigate your designs easily
-- ✅ **Document Management**: Create, save, and load projects
+- ✅ **Document Management**: Create, save, and load projects (.lbrn format)
+- ✅ **Transform Tools**: Scale, rotate, and mirror shapes with interactive handles
 
 ### User Interface
 - ✅ Modern, clean interface with dockable panels
@@ -53,6 +62,10 @@ LaserBurn is now ready for use! This is the first functional release with core f
 - `V` - Select tool
 - `R` - Rectangle tool
 - `E` - Ellipse tool
+- `L` - Line tool
+- `P` - Polygon tool
+- `N` - Pen tool (freehand)
+- `T` - Text tool
 
 ### File Operations
 - `Ctrl+N` - New document
@@ -71,15 +84,18 @@ LaserBurn is now ready for use! This is the first functional release with core f
 ## 🔧 Technical Details
 
 ### Supported File Formats
-- **Import**: SVG (basic shapes and paths)
-- **Export**: G-code (.gcode, .nc, .ngc), SVG
+- **Import**: SVG (full path command support), PNG, JPG, GIF, BMP, native project (.lbrn)
+- **Export**: G-code (.gcode, .nc, .ngc), SVG, native project (.lbrn)
 
 ### G-Code Compatibility
-- GRBL 1.1+ compatible
+- GRBL 1.1+ compatible (fully operational controller support)
 - Standard G-code commands (G0, G1, M3, M4, M5)
 - Configurable power and speed settings
+- **Path optimization**: TSP approximation for reduced travel time
+- **Bidirectional scanning**: Optimized fill patterns and image engraving
 - **Optimized output**: Uses G1 S0 for white space (matching LightBurn) for better controller compatibility
 - **Intelligent filtering**: Automatically skips tiny moves (< 0.05mm) to reduce file size
+- **Fill patterns**: Horizontal, vertical, crosshatch, and diagonal with even-odd fill rule
 
 ### System Requirements
 - Python 3.10 or higher
@@ -94,22 +110,26 @@ LaserBurn is now ready for use! This is the first functional release with core f
 - **Build Status**: See `BUILD_STATUS.md`
 - **Deployment**: See `DEPLOYMENT.md`
 
-## 🐛 Known Issues
+## 🐛 Known Limitations
 
-- GRBL controller communication not yet implemented (G-code export works)
-- Some advanced SVG features may not import correctly
 - No undo/redo functionality yet
-- Limited to basic shapes (rectangle, ellipse, paths)
+- Node editing not yet implemented
+- Boolean operations not yet implemented
+- DXF import/export not yet implemented
+- Image tracing (vectorization) not yet implemented
+- Material library not yet implemented
+- Camera integration not yet implemented
 
 ## 🔮 Coming Soon
 
-- Direct laser controller communication
-- Image processing and dithering
-- Material library with presets
-- More drawing tools (polygon, text, pen)
-- Boolean operations
+- Undo/redo system
+- Node editing for path manipulation
+- Boolean operations (union, difference, intersection)
 - DXF file support
+- Image tracing (vectorization)
+- Material library with presets
 - Camera integration
+- Additional controller support (Marlin, Smoothieware, Ruida, etc.)
 
 ## 🙏 Acknowledgments
 

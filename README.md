@@ -18,51 +18,84 @@ This repository contains a comprehensive development guide split into three part
 
 ---
 
-## 🎯 Target Features
+## 🎯 Features
 
-### Core Features (LightBurn Parity)
+### ✅ Implemented Features
 
 - **File Support**
-  - Import: SVG, DXF, AI, PDF, PLT, PNG, JPG, GIF, BMP
-  - Export: SVG, DXF, G-Code, native project format
+  - ✅ Import: SVG (full path command support), PNG, JPG, GIF, BMP
+  - ✅ Export: SVG, G-Code, native project format (.lbrn)
+  - ✅ Native project file format with complete serialization
 
 - **Design Tools**
-  - Shape primitives: Line, Rectangle, Ellipse, Polygon, Star, Text
-  - Path editing: Node manipulation, bezier curves
-  - Boolean operations: Union, Difference, Intersection, XOR
-  - Transformations: Scale, Rotate, Mirror, Align
+  - ✅ Shape primitives: Line, Rectangle, Ellipse, Polygon, Text
+  - ✅ Freehand drawing (Pen tool)
+  - ✅ Text tool with font selection
+  - ✅ Transformations: Scale, Rotate, Mirror
+  - ✅ Interactive selection handles for resizing and rotation
+  - ✅ Path support with bezier curves
 
 - **Laser Settings**
-  - Layer-based power/speed control
-  - Multiple operation types: Cut, Engrave, Fill
-  - Multi-pass support
-  - Air assist control
-  - Z-offset for focus
+  - ✅ Layer-based power/speed control
+  - ✅ Multiple operation types: Cut, Engrave, Fill
+  - ✅ Fill patterns: Horizontal, Vertical, Crosshatch, Diagonal
+  - ✅ Multi-pass support
+  - ✅ Air assist control
+  - ✅ Z-offset for focus
+  - ✅ Work area limits and validation
 
 - **Controller Support**
-  - GRBL (1.1+)
-  - Marlin
-  - Smoothieware
-  - Ruida (DSP)
-  - Trocen
-  - TopWisdom
+  - ✅ GRBL (1.1+) - **Fully Operational**
+    - Serial communication with flow control
+    - Real-time status monitoring
+    - Jog functionality
+    - Home and set home position
+    - Auto-detection of work area and max power ($30)
+    - Job queue management
 
 - **Image Processing**
-  - Multiple dithering algorithms (Floyd-Steinberg, Jarvis, Atkinson, Bayer, etc.)
-  - Image tracing (vectorization)
-  - Brightness/contrast adjustment
-  - Variable DPI engraving
+  - ✅ Multiple dithering algorithms (Floyd-Steinberg, Jarvis-Judice-Ninke, Stucki, Atkinson, Bayer 2x2/4x4/8x8, Threshold)
+  - ✅ Brightness/contrast adjustment
+  - ✅ Image inversion
+  - ✅ Variable DPI engraving
+  - ✅ Transparency (alpha channel) support
+  - ✅ Live preview with dithering applied
 
 - **Optimization**
-  - Path optimization (TSP approximation)
-  - Cut order optimization
-  - Start point optimization for closed paths
+  - ✅ Path optimization (TSP approximation)
+  - ✅ Cut order optimization
+  - ✅ Start point optimization for closed paths
+  - ✅ **Bidirectional scanning** for fill patterns and image engraving (optimized performance)
+  - ✅ Intelligent move filtering (skips tiny moves < 0.05mm)
+
+- **Special Features**
+  - ✅ Cylinder engraving (non-rotary) with automatic power compensation
+  - ✅ G-code preview widget
+  - ✅ Frame function (outline design perimeter)
+  - ✅ Job time estimation
+
+### 🚧 Planned Features
+
+- **File Support**
+  - DXF import/export
+  - AI, PDF, PLT support
+
+- **Design Tools**
+  - Node editing
+  - Boolean operations (Union, Difference, Intersection, XOR)
+  - Path offsetting
+  - Undo/redo system
+  - Copy/paste functionality
+
+- **Controller Support**
+  - Marlin, Smoothieware, Ruida, Trocen, TopWisdom
+
+- **Image Processing**
+  - Image tracing (vectorization)
 
 - **Additional Features**
   - Material library with presets
   - Camera alignment integration
-  - Job preview and simulation
-  - Time estimation
 
 ---
 
@@ -164,41 +197,50 @@ laserburn/
 
 ---
 
-## 📖 Development Guide Overview
+## 📖 Current Status
 
-### Phase 1: Foundation (Weeks 1-4)
-- Set up project structure
-- Implement core data structures (Point, Shape, Path, Layer, Document)
-- Basic serialization/deserialization
+### ✅ Completed Phases
 
-### Phase 2: File I/O (Weeks 5-8)
-- SVG parser with full path command support
-- DXF parser using ezdxf
-- Image import and basic processing
+**Phase 1: Foundation** ✅
+- Project structure complete
+- Core data structures implemented (Point, Shape, Path, Layer, Document)
+- Complete serialization/deserialization
 
-### Phase 3: Graphics Engine (Weeks 9-12)
+**Phase 2: File I/O** ✅
+- SVG parser with full path command support (all commands: M, L, H, V, C, S, Q, T, A, Z)
+- SVG transforms support (translate, rotate, scale, matrix, skew)
+- Image import with dithering and processing
+- Native project file format (.lbrn)
+
+**Phase 3: Graphics Engine** ✅
 - Qt Graphics View canvas implementation
-- Drawing tools (line, rectangle, ellipse, polygon)
-- Selection and transformation tools
-- Undo/redo system
+- Drawing tools (line, rectangle, ellipse, polygon, pen, text)
+- Selection and transformation tools (scale, rotate, mirror)
+- Interactive selection handles
 
-### Phase 4: Laser Control (Weeks 13-16)
+**Phase 4: Laser Control** ✅
 - G-code generator with optimization
-- GRBL controller implementation
-- Serial communication handling
-- Job management (start, pause, stop)
+- GRBL controller implementation (fully operational)
+- Serial communication with flow control
+- Job management (start, pause, stop, queue)
+- Path optimization (TSP approximation)
+- **Bidirectional scanning optimization** for fill patterns
 
-### Phase 5: Image Processing (Weeks 17-20)
-- Dithering algorithms implementation
-- Image tracing (potrace integration)
+**Phase 5: Image Processing** ✅
+- Multiple dithering algorithms implemented
+- Brightness/contrast adjustment
 - Scanline generation for engraving
+- Cylinder engraving with power compensation
 
-### Phase 6: Polish (Weeks 21-24)
+### 🚧 In Progress / Planned
+
+**Phase 6: Advanced Features**
 - Material library with SQLite
 - Camera integration
-- UI refinement
-- Testing and documentation
-- Packaging and distribution
+- Image tracing (vectorization)
+- Boolean operations
+- Node editing
+- Undo/redo system
 
 ---
 

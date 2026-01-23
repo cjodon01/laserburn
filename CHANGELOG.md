@@ -5,16 +5,23 @@ All notable changes to LaserBurn will be documented in this file.
 ## [Unreleased] - 2026-01-13
 
 ### Added
+- **Bidirectional scanning optimization** for SVG fill patterns and image engraving
+  - Alternates left-to-right and right-to-left on each scanline
+  - Eliminates unnecessary returns to start of each line
+  - Significantly reduces engraving time for wide designs
+  - Maintains full functionality while improving performance
 - G-code optimization improvements for better efficiency and compatibility
   - Changed white space handling from G0 (rapid moves) to G1 S0 (feed rate with laser off) to match LightBurn's approach
   - Added minimum move threshold (0.05mm) to automatically skip tiny moves and reduce file size
   - Automatic filtering of very small runs (< 0.05mm) for improved G-code efficiency
 
 ### Changed
+- Fill pattern processing now uses bidirectional scanning for optimal performance
 - G-code generation now uses G1 S0 for white space moves instead of G0 for better controller compatibility
 - Very small moves (< 0.05mm) are now automatically skipped to reduce file size without significant quality impact
 
 ### Technical
+- Optimized `_process_fill_patterns_optimized()` to use true bidirectional scanning
 - Improved G-code file size and efficiency through intelligent move filtering
 - Better compatibility with various GRBL controllers by matching LightBurn's white space handling approach
 

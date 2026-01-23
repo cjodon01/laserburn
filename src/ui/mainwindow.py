@@ -237,6 +237,41 @@ class MainWindow(QMainWindow):
         self.action_rotate_180.setStatusTip("Rotate selected shapes 180 degrees")
         self.action_rotate_180.triggered.connect(lambda: self._on_rotate(math.pi))
         
+        # Array action
+        self.action_array = QAction("Create &Array...", self)
+        self.action_array.setShortcut("Ctrl+Shift+A")
+        self.action_array.setStatusTip("Create an array of selected shapes")
+        self.action_array.triggered.connect(self._on_create_array)
+        
+        # Alignment actions
+        self.action_align_left = QAction("Align &Left", self)
+        self.action_align_left.setStatusTip("Align selected shapes to the left")
+        self.action_align_left.triggered.connect(lambda: self._on_align('left'))
+        
+        self.action_align_right = QAction("Align &Right", self)
+        self.action_align_right.setStatusTip("Align selected shapes to the right")
+        self.action_align_right.triggered.connect(lambda: self._on_align('right'))
+        
+        self.action_align_top = QAction("Align &Top", self)
+        self.action_align_top.setStatusTip("Align selected shapes to the top")
+        self.action_align_top.triggered.connect(lambda: self._on_align('top'))
+        
+        self.action_align_bottom = QAction("Align &Bottom", self)
+        self.action_align_bottom.setStatusTip("Align selected shapes to the bottom")
+        self.action_align_bottom.triggered.connect(lambda: self._on_align('bottom'))
+        
+        self.action_align_center_h = QAction("Align Center &Horizontal", self)
+        self.action_align_center_h.setStatusTip("Align selected shapes to center horizontally")
+        self.action_align_center_h.triggered.connect(lambda: self._on_align('center_h'))
+        
+        self.action_align_center_v = QAction("Align Center &Vertical", self)
+        self.action_align_center_v.setStatusTip("Align selected shapes to center vertically")
+        self.action_align_center_v.triggered.connect(lambda: self._on_align('center_v'))
+        
+        self.action_align_center_both = QAction("Align Center &Both", self)
+        self.action_align_center_both.setStatusTip("Align selected shapes to center both axes")
+        self.action_align_center_both.triggered.connect(lambda: self._on_align('center_both'))
+        
         # Cylinder engraving action
         self.action_cylinder_engraving = QAction("Cylinder &Engraving...", self)
         self.action_cylinder_engraving.setStatusTip("Configure cylinder engraving settings")
@@ -409,6 +444,21 @@ class MainWindow(QMainWindow):
         transform_menu.addSeparator()
         transform_menu.addAction(self.action_rotate_90)
         transform_menu.addAction(self.action_rotate_180)
+        
+        # Array submenu
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_array)
+        
+        # Alignment submenu
+        align_menu = edit_menu.addMenu("&Align")
+        align_menu.addAction(self.action_align_left)
+        align_menu.addAction(self.action_align_right)
+        align_menu.addAction(self.action_align_top)
+        align_menu.addAction(self.action_align_bottom)
+        align_menu.addSeparator()
+        align_menu.addAction(self.action_align_center_h)
+        align_menu.addAction(self.action_align_center_v)
+        align_menu.addAction(self.action_align_center_both)
         
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_image_settings)
@@ -1666,4 +1716,60 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             super().keyPressEvent(event)
+    
+    def _on_create_array(self):
+        """Open array dialog and create array of selected shapes."""
+        from .dialogs.array_dialog import ArrayDialog
+        
+        # Check if shapes are selected
+        selected_shapes = self.canvas.get_selected_shapes()
+        if not selected_shapes:
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Please select one or more shapes to create an array."
+            )
+            return
+        
+        # Open dialog
+        dialog = ArrayDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            rows = dialog.get_rows()
+            columns = dialog.get_columns()
+            x_spacing = dialog.get_x_spacing()
+            y_spacing = dialog.get_y_spacing()
+            
+            # Create array
+            self.canvas.create_array(rows, columns, x_spacing, y_spacing)
+            
+            self.status_bar.showMessage(
+                f"Created array: {rows}x{columns} ({rows * columns - 1} copies)"
+            )
+    
+    def _on_align(self, alignment: str):
+        """Align selected shapes."""
+        selected_shapes = self.canvas.get_selected_shapes()
+        if len(selected_shapes) < 2:
+            QMessageBox.information(
+                self,
+                "Insufficient Selection",
+                "Please select at least 2 shapes to align."
+            )
+            return
+        
+        self.canvas.align_shapes(alignment)
+        
+        alignment_names = {
+            'left': 'Left',
+            'right': 'Right',
+            'top': 'Top',
+            'bottom': 'Bottom',
+            'center_h': 'Center Horizontal',
+            'center_v': 'Center Vertical',
+            'center_both': 'Center Both'
+        }
+        
+        self.status_bar.showMessage(
+            f"Aligned {len(selected_shapes)} shapes: {alignment_names.get(alignment, alignment)}"
+        )
 
